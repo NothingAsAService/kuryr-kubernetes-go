@@ -26,6 +26,10 @@ const (
 	// handler that creates those groups. They have to be enabled together,
 	// which is what several of the checks in Validate are about.
 	policyName = "policy"
+
+	// driverNoop is the "do nothing" driver: no port pool, no extra
+	// interfaces. It is the default for both slots that accept it.
+	driverNoop = "noop"
 )
 
 // Config is the whole of kuryr.conf.
@@ -55,6 +59,7 @@ type Kubernetes struct {
 	PodProjectDriver            string
 	ServiceProjectDriver        string
 	NamespaceProjectDriver      string
+	NetworkPolicyProjectDriver  string
 	PodSubnetsDriver            string
 	ServiceSubnetsDriver        string
 	PodSecurityGroupsDriver     string
@@ -190,14 +195,15 @@ func Defaults() *Config {
 			PodProjectDriver:            driverDefault,
 			ServiceProjectDriver:        driverDefault,
 			NamespaceProjectDriver:      driverDefault,
+			NetworkPolicyProjectDriver:  driverDefault,
 			PodSubnetsDriver:            driverDefault,
 			ServiceSubnetsDriver:        driverDefault,
 			PodSecurityGroupsDriver:     driverDefault,
 			ServiceSecurityGroupsDriver: driverDefault,
 			PodVIFDriver:                "neutron-vif",
-			VIFPoolDriver:               "noop",
+			VIFPoolDriver:               driverNoop,
 			EndpointsOctaviaProvider:    driverDefault,
-			MultiVIFDrivers:             []string{"noop"},
+			MultiVIFDrivers:             []string{driverNoop},
 			EnabledHandlers: []string{
 				"vif", "kuryrport", "service", "kuryrloadbalancer",
 			},
@@ -268,6 +274,7 @@ func (c *Config) applyINI(f *ini.File) {
 	str(k, "pod_project_driver", &c.Kubernetes.PodProjectDriver)
 	str(k, "service_project_driver", &c.Kubernetes.ServiceProjectDriver)
 	str(k, "namespace_project_driver", &c.Kubernetes.NamespaceProjectDriver)
+	str(k, "network_policy_project_driver", &c.Kubernetes.NetworkPolicyProjectDriver)
 	str(k, "pod_subnets_driver", &c.Kubernetes.PodSubnetsDriver)
 	str(k, "service_subnets_driver", &c.Kubernetes.ServiceSubnetsDriver)
 	str(k, "pod_security_groups_driver", &c.Kubernetes.PodSecurityGroupsDriver)
@@ -452,6 +459,13 @@ func (c *Config) validateHandlerPairs(handlers map[string]bool) error {
 // validateDrivers checks the settings a driver needs from the rest of the
 // file, and the handlers a driver cannot work without.
 func (c *Config) validateDrivers(handlers map[string]bool) error {
+	// nested-dpdk attaches each interface to a specific node VM through Nova,
+	// so there is no such thing as an interchangeable unbound port to pool.
+	if c.Kubernetes.PodVIFDriver == "nested-dpdk" && c.Kubernetes.VIFPoolDriver != driverNoop {
+		return fmt.Errorf(
+			"[kubernetes]pod_vif_driver=nested-dpdk cannot be pooled; set vif_pool_driver=noop, not %q",
+			c.Kubernetes.VIFPoolDriver)
+	}
 	if handlers["service"] && c.NeutronDefaults.ServiceSubnet == "" &&
 		c.Kubernetes.ServiceSubnetsDriver == driverDefault {
 		return fmt.Errorf(

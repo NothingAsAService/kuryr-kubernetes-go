@@ -280,6 +280,11 @@ type multiVIFFactory func(Deps, VIFDriverFor) (MultiVIFDriver, error)
 var multiVIFDrivers = map[string]multiVIFFactory{
 	"noop": func(Deps, VIFDriverFor) (MultiVIFDriver, error) { return noopMultiVIF{}, nil },
 	"npwg": newNPWGMultiVIF,
+
+	// The name the Python implementation registered. An existing kuryr.conf
+	// says this, and refusing to start on it would be a rename dressed up as
+	// a configuration error.
+	"npwg_multiple_interfaces": newNPWGMultiVIF,
 }
 
 func newNPWGMultiVIF(d Deps, resolve VIFDriverFor) (MultiVIFDriver, error) {

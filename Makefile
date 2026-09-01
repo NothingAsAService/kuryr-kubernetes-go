@@ -1,6 +1,6 @@
 # Kuryr-Kubernetes (Go) — kubebuilder v4 Makefile.
 #
-# Kuryr ships three binaries rather than the single manager kubebuilder
+# Kuryr ships four binaries rather than the single manager kubebuilder
 # scaffolds, so the build and docker targets are parameterised by binary.
 # Everything else is the stock kubebuilder target.
 
@@ -98,10 +98,11 @@ lint-fix: golangci-lint ## Run golangci-lint and apply what it can fix itself.
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet ## Build all three binaries into bin/.
+build: manifests generate fmt vet ## Build all four binaries into bin/.
 	go build -o bin/kuryr-controller ./cmd/kuryr-controller
 	go build -o bin/kuryr-daemon ./cmd/kuryr-daemon
 	go build -o bin/kuryr-cni ./cmd/kuryr-cni
+	go build -o bin/kuryr-status ./cmd/kuryr-status
 
 KURYR_CONF ?= etc/kuryr.conf
 
@@ -174,6 +175,9 @@ undeploy: kustomize ## Remove them again.
 
 ##@ Dependencies
 
+# Tool binaries land here. GNU make cannot express a target whose name
+# contains a space, so a checkout under such a path breaks every tool target.
+# Override it in that case: make test LOCALBIN=/tmp/kuryr-bin
 LOCALBIN ?= $(shell pwd)/bin
 $(LOCALBIN):
 	mkdir -p $(LOCALBIN)

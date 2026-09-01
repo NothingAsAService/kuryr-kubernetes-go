@@ -29,6 +29,10 @@ type strategy interface {
 	// identifies the trunk the subport hangs off.
 	HostKey(req drivers.PodVIFRequest) (string, error)
 
+	// HostKeyForNode is HostKey for a node with no pod in hand, which is what
+	// priming a pool ahead of the first pod needs.
+	HostKeyForNode(node *corev1.Node) (string, error)
+
 	// MarkInUse renames a port as it leaves the pool, when port_debug is on.
 	MarkInUse(ctx context.Context, portID string, pod *corev1.Pod) error
 
@@ -157,4 +161,24 @@ func (s *nestedStrategy) MarkAvailable(ctx context.Context, portID string) error
 // subports the previous process left behind.
 func (s *nestedStrategy) Recover(ctx context.Context, p *Pool) error {
 	return recoverNested(ctx, p)
+}
+
+// HostKeyForNode returns the node name, which is what a bare metal port binds
+// to.
+func (s *baremetalStrategy) HostKeyForNode(node *corev1.Node) (string, error) {
+	if node.Name == "" {
+		return "", fmt.Errorf("pool: node has no name")
+	}
+	return node.Name, nil
+}
+
+// HostKeyForNode returns the node VM's address, which is what identifies the
+// trunk its subports hang off.
+func (s *nestedStrategy) HostKeyForNode(node *corev1.Node) (string, error) {
+	for _, addr := range node.Status.Addresses {
+		if addr.Type == corev1.NodeInternalIP && addr.Address != "" {
+			return addr.Address, nil
+		}
+	}
+	return "", fmt.Errorf("pool: node %s has no InternalIP, so its trunk cannot be identified", node.Name)
 }

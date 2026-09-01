@@ -35,6 +35,9 @@ type Manager interface {
 	RunRecycler(ctx context.Context) error
 	// DeleteNetworkPools empties the pools on a network being torn down.
 	DeleteNetworkPools(ctx context.Context, networkID string) error
+	// Populate primes the pool for one node and network ahead of the first
+	// pod that needs it.
+	Populate(ctx context.Context, node *corev1.Node, req drivers.PodVIFRequest) error
 	// NeedLeaderElection keeps port creation to the active controller.
 	NeedLeaderElection() bool
 }
@@ -267,4 +270,19 @@ func (m *Multi) Stats() map[string]int {
 		}
 	}
 	return out
+}
+
+// Populate primes the pool of whichever driver this node is labelled for.
+func (m *Multi) Populate(ctx context.Context, node *corev1.Node, req drivers.PodVIFRequest) error {
+	alias, err := m.aliasForNode(ctx, node.Name)
+	if err != nil {
+		return err
+	}
+	p, ok := m.pools[alias]
+	if !ok {
+		return fmt.Errorf(
+			"node %s is labelled %s=%s but no pool is configured for that driver; known: %v",
+			node.Name, NodeVIFLabel, alias, m.aliases())
+	}
+	return p.Populate(ctx, node, req)
 }

@@ -179,7 +179,7 @@ func setupControllers(ctx context.Context, mgr manager.Manager, cfg *config.Conf
 	if err := setupNamespaceControllers(mgr, cfg, deps, osClient, pools); err != nil {
 		return err
 	}
-	if err := setupPolicyControllers(mgr, cfg, osClient); err != nil {
+	if err := setupPolicyControllers(mgr, cfg, osClient, deps); err != nil {
 		return err
 	}
 	return setupServiceControllers(ctx, mgr, cfg, deps, osClient)
@@ -187,7 +187,7 @@ func setupControllers(ctx context.Context, mgr manager.Manager, cfg *config.Conf
 
 // setupPodControllers wires the pod lifeline: Pod, KuryrPort and the drivers
 // that turn one into a Neutron port.
-func setupPodControllers(mgr manager.Manager, cfg *config.Config, deps drivers.Deps) (controller.PoolCleaner, error) {
+func setupPodControllers(mgr manager.Manager, cfg *config.Config, deps drivers.Deps) (controller.Pools, error) {
 	// The vif and kuryrport handlers are two halves of one feature; config
 	// validation has already rejected enabling only one of them.
 	if !cfg.HandlerEnabled("vif") {
@@ -260,7 +260,7 @@ func setupPodControllers(mgr manager.Manager, cfg *config.Config, deps drivers.D
 // requests nobody serves or resources nobody asks for, which config
 // validation already rejects.
 func setupNamespaceControllers(mgr manager.Manager, cfg *config.Config, deps drivers.Deps,
-	osClient *openstack.Client, pools controller.PoolCleaner) error {
+	osClient *openstack.Client, pools controller.Pools) error {
 
 	if !cfg.HandlerEnabled("namespace") {
 		return nil
@@ -301,7 +301,9 @@ func setupNamespaceControllers(mgr manager.Manager, cfg *config.Config, deps dri
 // cluster, and the second only talks to Neutron. What connects them to a
 // running pod is the policy security groups driver, which the kuryrport
 // controller uses.
-func setupPolicyControllers(mgr manager.Manager, cfg *config.Config, osClient *openstack.Client) error {
+func setupPolicyControllers(mgr manager.Manager, cfg *config.Config,
+	osClient *openstack.Client, deps drivers.Deps) error {
+
 	if !cfg.HandlerEnabled("policy") {
 		return nil
 	}
@@ -321,11 +323,17 @@ func setupPolicyControllers(mgr manager.Manager, cfg *config.Config, osClient *o
 		return fmt.Errorf("setting up the networkpolicy controller: %w", err)
 	}
 
+	npProjectDrv, err := drivers.NewProjectDriver(cfg.Kubernetes.NetworkPolicyProjectDriver, deps)
+	if err != nil {
+		return err
+	}
+
 	knpReconciler := &controller.KuryrNetworkPolicyReconciler{
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
 		Config:    cfg,
 		OpenStack: osClient,
+		Project:   npProjectDrv,
 	}
 	if err := knpReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setting up the kuryrnetworkpolicy controller: %w", err)
@@ -490,7 +498,7 @@ func openstackReadyCheck(c *openstack.Client) healthz.Checker {
 // handed a drivers.PodVIFDriver either way and never learns whether its ports
 // came from a pool or straight from Neutron.
 func buildVIFDriver(mgr manager.Manager, cfg *config.Config,
-	deps drivers.Deps) (drivers.PodVIFDriver, controller.PoolCleaner, error) {
+	deps drivers.Deps) (drivers.PodVIFDriver, controller.Pools, error) {
 
 	logger := ctrl.Log.WithName("setup")
 

@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	kuryrv1 "opendev.org/openstack/kuryr-kubernetes/api/v1"
+	"opendev.org/openstack/kuryr-kubernetes/pkg/config"
 	"opendev.org/openstack/kuryr-kubernetes/pkg/openstack"
 	"opendev.org/openstack/kuryr-kubernetes/pkg/vif"
 )
@@ -332,4 +333,28 @@ func subnetIDs(s vif.SubnetSet) []string {
 		out = append(out, id)
 	}
 	return out
+}
+
+// The Python implementation registered this driver as
+// npwg_multiple_interfaces. An existing kuryr.conf says that, and the rewrite
+// promises to read those files unchanged.
+func TestNPWGAcceptsTheUpstreamDriverName(t *testing.T) {
+	for _, name := range []string{"npwg", "npwg_multiple_interfaces"} {
+		deps := Deps{
+			Config: &config.Config{},
+			K8s:    fake.NewClientBuilder().WithScheme(policyTestScheme(t)).Build(),
+		}
+		resolve := func(string) (PodVIFDriver, error) { return nil, nil }
+
+		drvs, err := NewMultiVIFDrivers([]string{name}, deps, resolve)
+		if err != nil {
+			t.Fatalf("NewMultiVIFDrivers(%q): %v", name, err)
+		}
+		if len(drvs) != 1 {
+			t.Fatalf("%q built %d drivers, want 1", name, len(drvs))
+		}
+		if got := drvs[0].Name(); got != "npwg" {
+			t.Errorf("%q built driver %q, want npwg", name, got)
+		}
+	}
 }

@@ -29,6 +29,10 @@ type Client struct {
 	// present in the catalog, which is legitimate for a cluster that does not
 	// use the service handlers.
 	LoadBalancer *gophercloud.ServiceClient
+	// Compute is the Nova v2 endpoint, nil when it is not in the catalog. Only
+	// the nested-dpdk driver needs it: attaching an interface to the node VM
+	// is a compute operation, not a Neutron one.
+	Compute *gophercloud.ServiceClient
 
 	// Tags is applied to every resource Kuryr creates, so that a cluster
 	// teardown can find its own leftovers without touching anything else in
@@ -99,6 +103,12 @@ func New(ctx context.Context, cfg *config.Config) (*Client, error) {
 	// unhelpful.
 	if lb, err := openstack.NewLoadBalancerV2(provider, eo); err == nil {
 		c.LoadBalancer = lb
+	}
+
+	// Nova is optional for the same reason: only nested-dpdk asks for it, and
+	// that driver reports the missing endpoint itself.
+	if compute, err := openstack.NewComputeV2(provider, eo); err == nil {
+		c.Compute = compute
 	}
 
 	c.caps = detectCapabilities(ctx, network)

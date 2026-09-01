@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,13 +18,18 @@ import (
 
 	kuryrv1 "opendev.org/openstack/kuryr-kubernetes/api/v1"
 	"opendev.org/openstack/kuryr-kubernetes/pkg/config"
+	"opendev.org/openstack/kuryr-kubernetes/pkg/drivers"
 	"opendev.org/openstack/kuryr-kubernetes/pkg/openstack"
+	"opendev.org/openstack/kuryr-kubernetes/pkg/vif"
 )
 
-// PoolCleaner empties the port pools on a network before it is deleted.
-// It is nil when pooling is off.
-type PoolCleaner interface {
+// Pools is the part of the port pool this reconciler drives. It is nil when
+// pooling is off, so every call site has to tolerate that.
+type Pools interface {
+	// DeleteNetworkPools empties the pools on a network before it is deleted.
 	DeleteNetworkPools(ctx context.Context, networkID string) error
+	// Populate primes the pool for one node and network.
+	Populate(ctx context.Context, node *corev1.Node, req drivers.PodVIFRequest) error
 }
 
 // KuryrNetworkReconciler builds the Neutron network behind a namespace.
@@ -38,7 +44,7 @@ type KuryrNetworkReconciler struct {
 	OpenStack *openstack.Client
 
 	// Pool is optional; it is nil when [kubernetes]vif_pool_driver is noop.
-	Pool PoolCleaner
+	Pool Pools
 }
 
 // +kubebuilder:rbac:groups=openstack.org,resources=kuryrnetworks,verbs=get;list;watch;create;update;patch;delete
@@ -80,6 +86,7 @@ func (r *KuryrNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err := r.ensureRouter(ctx, &kn); err != nil {
 		return ctrl.Result{}, err
 	}
+	r.primePools(ctx, &kn)
 	if err := r.syncLabels(ctx, &kn); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -339,4 +346,69 @@ func (r *KuryrNetworkReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}).
 		Named("kuryrnetwork").
 		Complete(r)
+}
+
+// primePools fills the port pools for this namespace's subnet on every node,
+// so the first pod scheduled into it is served from a pool rather than waiting
+// on a bulk create.
+//
+// Populated is recorded before the work rather than after. Priming twice would
+// create a second batch on every node, while a prime that failed part way is
+// made good by the ordinary top-up the first time a pod asks -- so the cheaper
+// mistake to make is to skip.
+//
+// Failures are logged, not returned: a pool is an optimisation, and a cloud
+// too busy to pre-create ports must not also stop the namespace from getting
+// its network.
+func (r *KuryrNetworkReconciler) primePools(ctx context.Context, kn *kuryrv1.KuryrNetwork) {
+	if r.Pool == nil || kn.Status.Populated || kn.Status.SubnetID == "" {
+		return
+	}
+	logger := log.FromContext(ctx)
+
+	subnet, err := r.OpenStack.GetSubnet(ctx, kn.Status.SubnetID)
+	if err != nil {
+		logger.Error(err, "could not read the namespace subnet to prime the pools",
+			"subnetID", kn.Status.SubnetID)
+		return
+	}
+
+	var nodes corev1.NodeList
+	if err := r.List(ctx, &nodes); err != nil {
+		logger.Error(err, "could not list nodes to prime the pools")
+		return
+	}
+
+	patch := client.MergeFrom(kn.DeepCopy())
+	kn.Status.Populated = true
+	if err := r.Status().Patch(ctx, kn, patch); err != nil {
+		// Priming without recording it would prime again on the next pass, so
+		// give up rather than risk creating a batch per reconcile.
+		logger.Error(err, "could not record that the pools were primed; skipping")
+		return
+	}
+
+	req := drivers.PodVIFRequest{
+		ProjectID:      kn.Spec.ProjectID,
+		Subnets:        vif.SubnetSet{subnet.ID: subnet},
+		SecurityGroups: r.Config.NeutronDefaults.PodSecurityGroups,
+	}
+
+	primed := 0
+	for i := range nodes.Items {
+		node := &nodes.Items[i]
+		// A cordoned node will not be given pods, so ports pooled against it
+		// would sit unused until someone uncordons it.
+		if node.Spec.Unschedulable {
+			continue
+		}
+		if err := r.Pool.Populate(ctx, node, req); err != nil {
+			logger.V(1).Info("could not prime the pool for a node",
+				"node", node.Name, "subnetID", subnet.ID, "error", err)
+			continue
+		}
+		primed++
+	}
+	logger.Info("primed the port pools for the namespace subnet",
+		"subnetID", subnet.ID, "nodes", primed)
 }

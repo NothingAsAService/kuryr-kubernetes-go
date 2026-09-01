@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,6 +19,7 @@ import (
 
 	kuryrv1 "opendev.org/openstack/kuryr-kubernetes/api/v1"
 	"opendev.org/openstack/kuryr-kubernetes/pkg/config"
+	"opendev.org/openstack/kuryr-kubernetes/pkg/drivers"
 	"opendev.org/openstack/kuryr-kubernetes/pkg/openstack"
 	"opendev.org/openstack/kuryr-kubernetes/pkg/policy"
 )
@@ -33,6 +35,10 @@ type KuryrNetworkPolicyReconciler struct {
 	Scheme    *runtime.Scheme
 	Config    *config.Config
 	OpenStack securityGroupCloud
+
+	// Project resolves which OpenStack project a policy security group belongs
+	// in, for namespaces that have no KuryrNetwork to read it from.
+	Project drivers.ProjectDriver
 }
 
 // securityGroupCloud is the slice of Neutron this reconciler uses. Naming it
@@ -165,9 +171,30 @@ func (r *KuryrNetworkPolicyReconciler) projectFor(ctx context.Context,
 		}
 	}
 
+	// No KuryrNetwork, so this namespace has no network of its own. Ask the
+	// configured driver, which is what honours a namespace annotation when
+	// [kubernetes]network_policy_project_driver is set to annotation.
+	//
+	// The KuryrNetwork is preferred over the driver rather than the other way
+	// round: it names the project the namespace's network was actually built
+	// in, so putting the policy's security group anywhere else would leave it
+	// unable to apply to the ports it is meant to govern.
+	if r.Project != nil {
+		ns := &corev1.Namespace{}
+		ns.Name = knp.Namespace
+		id, err := r.Project.ProjectFor(ctx, ns)
+		if err != nil {
+			return "", fmt.Errorf("resolving the project of namespace %s: %w", knp.Namespace, err)
+		}
+		if id != "" {
+			return id, nil
+		}
+	}
+
 	if r.Config.NeutronDefaults.Project == "" {
-		return "", fmt.Errorf("no project for namespace %s: neither a KuryrNetwork nor "+
-			"[neutron_defaults] project is set", knp.Namespace)
+		return "", fmt.Errorf("no project for namespace %s: neither a KuryrNetwork, the "+
+			"network policy project driver, nor [neutron_defaults]project provided one",
+			knp.Namespace)
 	}
 	return r.Config.NeutronDefaults.Project, nil
 }
