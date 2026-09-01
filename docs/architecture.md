@@ -149,7 +149,7 @@ it out.
 | `bridge` | A veth pair; the host end enslaved to a Linux bridge, which is what Neutron asks for when it wants iptables rules on the port |
 | `nested-vlan` | An 802.1Q subinterface of the node VM uplink, moved into the pod namespace |
 | `nested-macvlan` | A macvlan child of the node VM uplink — no trunk, no VLAN id limit, and no Neutron filtering |
-| `nested-dpdk` | The device is unbound from its kernel driver and rebound to a userspace one; the pod drives it itself |
+| `nested-dpdk` | The device is unbound from its kernel driver and rebound to a userspace one; the pod drives it itself. The port behind it is attached to the node VM through Nova, not Neutron, so it cannot be pooled |
 | `vhostuser` | A vhost-user socket, plus a file describing it, placed where the pod can reach them |
 
 Everything that touches netlink is behind a `linux` build tag. The interface
@@ -183,6 +183,11 @@ Creating a Neutron port takes long enough to be visible in pod start latency.
 The pool trades quota for that latency: ports are created in bulk ahead of
 time, and a pod is handed one that already exists.
 
+- A pool is primed when a namespace network is created, so the first pod
+  scheduled into that namespace is served from it rather than waiting. Priming
+  is recorded on the `KuryrNetwork` before it runs: doing it twice would create
+  a batch per node again, while a prime that failed part way is made good by
+  the ordinary top-up on first use.
 - The first request for a given pool fills it synchronously, so the first pod
   on a node does not fail and get retried.
 - Every later request is served from the pool and schedules a background

@@ -17,6 +17,7 @@ func init() {
 	RegisterPodVIFDriver("neutron-vif", newNeutronVIFDriver)
 	RegisterPodVIFDriver("nested-vlan", newNestedVLANDriver)
 	RegisterPodVIFDriver("nested-macvlan", newNestedMacvlanDriver)
+	RegisterPodVIFDriver("nested-dpdk", newNestedDPDKDriver)
 }
 
 // portName builds the Neutron port name for a pod. Naming ports after pods is
@@ -508,6 +509,114 @@ func (n *nestedMacvlanDriver) ActivateVIF(ctx context.Context, v *kuryrv1.VIF, _
 // UpdateVIFSecurityGroups re-applies groups to the port. Neutron does not
 // filter macvlan traffic, so this records intent more than it enforces it.
 func (n *nestedMacvlanDriver) UpdateVIFSecurityGroups(ctx context.Context, v *kuryrv1.VIF,
+	sgs []string) error {
+
+	_, err := n.os.UpdatePort(ctx, v.ID, openstack.PortUpdate{SecurityGroups: &sgs})
+	return err
+}
+
+// --- nested-dpdk -------------------------------------------------------
+
+// nestedDPDKDriver hands a pod an interface on the node VM that a userspace
+// driver in the pod then takes over.
+//
+// It is the one pod VIF driver that goes through Nova rather than Neutron. The
+// interface has to be plugged into the node VM itself, and only the compute
+// API can do that; creating the port directly would leave it attached to
+// nothing. That is also why there is no trunk and no VLAN id here.
+type nestedDPDKDriver struct {
+	os  *openstack.Client
+	cfg *config.Config
+}
+
+func newNestedDPDKDriver(d Deps) (PodVIFDriver, error) {
+	if d.OpenStack.Compute == nil {
+		return nil, fmt.Errorf(
+			"pod_vif_driver=nested-dpdk attaches interfaces through Nova, which is not in the service catalog")
+	}
+	return &nestedDPDKDriver{os: d.OpenStack, cfg: d.Config}, nil
+}
+
+// Name is the registered driver name, used in logs and metrics.
+func (n *nestedDPDKDriver) Name() string { return "nested-dpdk" }
+
+// serverFor resolves the Nova instance the pod runs in, by way of the Neutron
+// port holding the node's address.
+func (n *nestedDPDKDriver) serverFor(ctx context.Context, req PodVIFRequest) (string, error) {
+	hostIP, err := hostIPFor(req)
+	if err != nil {
+		return "", err
+	}
+	parent, err := n.os.FindPortByFixedIP(ctx, hostIP)
+	if err != nil {
+		return "", fmt.Errorf("finding the node VM port for %s: %w", hostIP, err)
+	}
+	if parent.DeviceID == "" {
+		return "", fmt.Errorf("the node VM port for %s has no device_id, so its instance is unknown", hostIP)
+	}
+	return parent.DeviceID, nil
+}
+
+// RequestVIF asks Nova to attach an interface on the pod's network to the node
+// VM, and describes the resulting port as a DPDK VIF.
+func (n *nestedDPDKDriver) RequestVIF(ctx context.Context, req PodVIFRequest) (*kuryrv1.VIF, error) {
+	networkID, ok := req.Subnets.NetworkID()
+	if !ok {
+		return nil, fmt.Errorf("subnets for pod span more than one network")
+	}
+	serverID, err := n.serverFor(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	port, err := n.os.AttachServerInterface(ctx, serverID, networkID)
+	if err != nil {
+		return nil, err
+	}
+
+	network, err := n.os.GetNetwork(ctx, port.NetworkID)
+	if err != nil {
+		// The interface exists but cannot be described; detach it rather than
+		// leave the node VM holding one nothing will ever use.
+		if detachErr := n.os.DetachServerInterface(ctx, serverID, port.ID); detachErr != nil {
+			return nil, fmt.Errorf("%w (and detaching the interface again failed: %w)", err, detachErr)
+		}
+		return nil, err
+	}
+	return vif.FromPortNestedDPDK(port, req.Subnets, network)
+}
+
+// RequestVIFs is not supported: an interface has to be attached to a specific
+// node VM, so there is no such thing as an interchangeable unbound one to pool.
+// Pooling is refused at startup rather than here, because a pool that cannot
+// be filled is a configuration mistake, not a runtime condition.
+func (n *nestedDPDKDriver) RequestVIFs(context.Context, PodVIFRequest, int) ([]*kuryrv1.VIF, error) {
+	return nil, fmt.Errorf(
+		"the nested-dpdk driver cannot create unbound ports in bulk; set [kubernetes]vif_pool_driver=noop")
+}
+
+// ReleaseVIF detaches the interface from the node VM, which deletes the port.
+func (n *nestedDPDKDriver) ReleaseVIF(ctx context.Context, v *kuryrv1.VIF, req PodVIFRequest) error {
+	serverID, err := n.serverFor(ctx, req)
+	if err != nil {
+		return err
+	}
+	return n.os.DetachServerInterface(ctx, serverID, v.ID)
+}
+
+// ActivateVIF marks the VIF active without asking Neutron.
+//
+// Nova reported success when it attached the interface, and the node-side
+// driver then rebinds the device to a userspace driver -- at which point the
+// kernel no longer owns it and Neutron has nothing left to report a status
+// from. Waiting for ACTIVE here would wait forever.
+func (n *nestedDPDKDriver) ActivateVIF(_ context.Context, v *kuryrv1.VIF, _ PodVIFRequest) error {
+	v.Active = true
+	return nil
+}
+
+// UpdateVIFSecurityGroups re-applies groups to the port behind the interface.
+func (n *nestedDPDKDriver) UpdateVIFSecurityGroups(ctx context.Context, v *kuryrv1.VIF,
 	sgs []string) error {
 
 	_, err := n.os.UpdatePort(ctx, v.ID, openstack.PortUpdate{SecurityGroups: &sgs})

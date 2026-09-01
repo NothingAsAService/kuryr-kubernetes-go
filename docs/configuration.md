@@ -49,6 +49,7 @@ to start rather than a pod stuck in `ContainerCreating`.
 | `pod_subnets_driver = namespace` requires the `kuryrnetwork` handler and `pod_router` | Nothing would create the per-namespace subnets |
 | `pod_security_groups_driver = policy` requires the `policy` handler, and vice versa | The driver applies the groups; the handler creates them. Either alone silently enforces nothing |
 | `pod_security_groups_driver = policy` requires `service_security_groups_driver = policy` | Otherwise a load balancer would not inherit the policy of the pods behind it |
+| `pod_vif_driver = nested-dpdk` requires `vif_pool_driver = noop` | Each DPDK interface is attached to one named node VM, so there is no interchangeable unbound port to pool |
 
 ## `[kubernetes]`
 
@@ -61,13 +62,14 @@ Which parts of Kuryr run, and which driver fills each slot.
 | `pod_project_driver` | `default` | Which OpenStack project owns a pod's resources: `default` (one project from `[neutron_defaults]project`) or `annotation` (read from the namespace's `openstack.org/kuryr-project`) |
 | `service_project_driver` | `default` | Same, for Services |
 | `namespace_project_driver` | `default` | Same, for Namespaces |
+| `network_policy_project_driver` | `default` | Same, for NetworkPolicies. Only consulted when the namespace has no KuryrNetwork to read the project from |
 | `pod_subnets_driver` | `default` | `default` puts every pod on `pod_subnet`; `namespace` gives each Kubernetes namespace its own Neutron subnet |
 | `service_subnets_driver` | `default` | Only `default` is implemented: the subnet from `[neutron_defaults]service_subnet` |
 | `pod_security_groups_driver` | `default` | `default` applies a fixed list; `policy` makes the groups follow NetworkPolicy |
 | `service_security_groups_driver` | `default` | `default` applies a fixed list; `policy` gives a load balancer the groups of the pods it fronts |
-| `pod_vif_driver` | `neutron-vif` | How pod ports are created: `neutron-vif`, `nested-vlan`, `nested-macvlan` |
+| `pod_vif_driver` | `neutron-vif` | How pod ports are created: `neutron-vif`, `nested-vlan`, `nested-macvlan`, `nested-dpdk`. `nested-dpdk` goes through Nova and cannot be pooled, so it requires `vif_pool_driver = noop` |
 | `vif_pool_driver` | `noop` | `noop` creates a port per pod on demand; `neutron` keeps a pool of pre-created ports |
-| `multi_vif_drivers` | `noop` | Extra interfaces: `noop`, or `npwg` to read the `k8s.v1.cni.cncf.io/networks` annotation. More than one may be listed; their results are concatenated |
+| `multi_vif_drivers` | `noop` | Extra interfaces: `noop`, or `npwg` to read the `k8s.v1.cni.cncf.io/networks` annotation (`npwg_multiple_interfaces`, the name the Python implementation used, is accepted too). More than one may be listed; their results are concatenated |
 | `endpoints_driver_octavia_provider` | `default` | The Octavia provider to build with. `default` lets the cloud choose. Checked against the cloud at startup |
 | `port_debug` | `false` | Name Neutron ports after their pod. Costs one extra write per port, and is worth it the first time you read a port list during an incident |
 | `controller_ha` | `false` | Hold a Lease so exactly one replica is active. `--leader-elect` overrides it |

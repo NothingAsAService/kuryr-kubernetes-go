@@ -763,3 +763,75 @@ func TestStrategyRejectsUnpoolableDriver(t *testing.T) {
 		t.Fatal("expected pooling to be refused for a driver it cannot support")
 	}
 }
+
+// Priming is what makes the first pod in a new namespace cheap: without it
+// that pod pays for a synchronous bulk create.
+func TestPopulatePrimesThePoolForANode(t *testing.T) {
+	p, inner, _ := newTestPool(t, func(c *config.Config) {
+		c.VIFPool.PortsPoolMin = 1
+		c.VIFPool.PortsPoolBatch = 4
+	})
+	ctx := context.Background()
+	if err := p.Recover(ctx); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if got := inner.createdCount(); got != 0 {
+		t.Fatalf("created %d ports before priming, want 0", got)
+	}
+
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: testNode}}
+	if err := p.Populate(ctx, node, testRequest("sg-a")); err != nil {
+		t.Fatalf("Populate: %v", err)
+	}
+	if got := inner.createdCount(); got != 4 {
+		t.Fatalf("priming created %d ports, want 4 (one batch)", got)
+	}
+	if got := totalOf(p.Stats()); got != 4 {
+		t.Fatalf("pool holds %d ports after priming, want 4", got)
+	}
+
+	// The pod that follows is served from what priming left, without another
+	// create. That is the whole point.
+	if _, err := p.RequestVIF(ctx, testRequest("sg-a")); err != nil {
+		t.Fatalf("RequestVIF: %v", err)
+	}
+	if got := inner.createdCount(); got != 4 {
+		t.Errorf("created %d ports in total, want 4; the pod should have come from the pool", got)
+	}
+}
+
+// Priming twice would create a second batch on every node, so a pool that is
+// already at ports_pool_min has to be left alone.
+func TestPopulateIsANoOpWhenThePoolIsStocked(t *testing.T) {
+	p, inner, _ := newTestPool(t, func(c *config.Config) {
+		c.VIFPool.PortsPoolMin = 1
+		c.VIFPool.PortsPoolBatch = 4
+	})
+	ctx := context.Background()
+	if err := p.Recover(ctx); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: testNode}}
+	if err := p.Populate(ctx, node, testRequest("sg-a")); err != nil {
+		t.Fatalf("Populate: %v", err)
+	}
+	if err := p.Populate(ctx, node, testRequest("sg-a")); err != nil {
+		t.Fatalf("Populate again: %v", err)
+	}
+	if got := inner.createdCount(); got != 4 {
+		t.Errorf("created %d ports over two primes, want 4", got)
+	}
+}
+
+// A node with no name cannot key a pool, and priming against the wrong key
+// would create ports no pod ever finds.
+func TestPopulateRejectsANamelessNode(t *testing.T) {
+	p, _, _ := newTestPool(t, nil)
+	if err := p.Recover(context.Background()); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if err := p.Populate(context.Background(), &corev1.Node{}, testRequest("sg-a")); err == nil {
+		t.Error("expected an error priming against a node with no name")
+	}
+}

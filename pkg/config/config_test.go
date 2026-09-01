@@ -252,3 +252,21 @@ func TestSampleCNIConflistIsUsable(t *testing.T) {
 			got, cfg.CNIDaemon.BindAddress)
 	}
 }
+
+// nested-dpdk attaches each interface to a named node VM through Nova, so a
+// pool of interchangeable unbound ports cannot exist. Catching it here beats
+// failing on the first pod with a driver that cannot answer RequestVIFs.
+func TestValidateRejectsPooledNestedDPDK(t *testing.T) {
+	cfg := loadShipped(t)
+	cfg.Kubernetes.PodVIFDriver = "nested-dpdk"
+	cfg.Kubernetes.VIFPoolDriver = "neutron"
+
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected an error for nested-dpdk with a pool driver")
+	}
+
+	cfg.Kubernetes.VIFPoolDriver = "noop"
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("nested-dpdk with vif_pool_driver=noop should be accepted: %v", err)
+	}
+}

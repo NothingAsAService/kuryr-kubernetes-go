@@ -21,7 +21,9 @@ COPY pkg/ pkg/
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o /out/kuryr-controller ./cmd/kuryr-controller
+        go build -trimpath -ldflags="-s -w" -o /out/kuryr-controller ./cmd/kuryr-controller \
+    && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+        go build -trimpath -ldflags="-s -w" -o /out/kuryr-status ./cmd/kuryr-status
 
 FROM gcr.io/distroless/static:nonroot
 LABEL org.opencontainers.image.title="kuryr-controller" \
@@ -29,6 +31,10 @@ LABEL org.opencontainers.image.title="kuryr-controller" \
       org.opencontainers.image.licenses="Apache-2.0"
 
 COPY --from=builder /out/kuryr-controller /kuryr-controller
+
+# The pre-flight checker, so an operator can run it in the same image and
+# against the same configuration the controller reads.
+COPY --from=builder /out/kuryr-status /kuryr-status
 
 # The distroless nonroot user. The controller talks to two APIs and writes
 # nothing to disk, so it never needs more.

@@ -24,13 +24,14 @@ place of several under `cotyledon`.
 
 ## What gets deployed
 
-Three binaries, from two container images:
+Four binaries, from two container images:
 
 | Binary | Runs as | Job |
 | --- | --- | --- |
 | `kuryr-controller` | a Deployment, 2 replicas, one active | Watches Kubernetes, creates and deletes Neutron and Octavia resources |
 | `kuryr-daemon` | a DaemonSet, one per node | Plugs interfaces into pod network namespaces |
 | `kuryr-cni` | a binary the daemon installs on the host | The CNI plugin the container runtime calls; forwards to `kuryr-daemon` over localhost |
+| `kuryr-status` | a one-shot command | Pre-flight checks: the configuration, the CRDs, and the cloud endpoints and extensions the configured drivers need |
 
 The controller never touches a node, and the daemon never talks to OpenStack.
 Everything between them travels through four CRDs, which is also what makes the
@@ -108,6 +109,20 @@ namespace before installing — the node agent is privileged by necessity:
 kubectl label ns kube-system pod-security.kubernetes.io/enforce=privileged
 ```
 
+### Check before you deploy
+
+`kuryr-status` reports what is wrong while there is still time to fix it,
+rather than after the controller has entered a crash loop. It ships in the
+controller image, so it can be run against the same configuration:
+
+```sh
+kuryr-status --config-file=/etc/kuryr/kuryr.conf              # everything
+kuryr-status --config-file=etc/kuryr.conf --config-only        # no cluster or cloud needed
+```
+
+It exits 0 on success, 1 if anything warned and 2 if anything failed, so it
+drops into a pipeline unchanged.
+
 ### Check it came up
 
 ```sh
@@ -131,6 +146,23 @@ make lint        # golangci-lint, the standing quality gate
 make build       # all three binaries into bin/
 make run         # the controller against ~/.kube/config, using etc/kuryr.conf
 ```
+
+### End-to-end tests
+
+```sh
+make setup-test-e2e   # a Kind cluster named kuryr-e2e
+make test-e2e
+```
+
+The suite installs `config/crd` into that cluster and checks the schemas
+against a real API server: that the four kinds are served under their short
+names, that a KuryrPort round trips through its status subresource, and that
+the API server actually rejects a missing required field and a bad enum. A
+schema regression passes every unit test and only shows up here.
+
+It pins itself to the `kind-kuryr-e2e` context rather than using the current
+one, and skips entirely when that context does not exist, so `go test ./...`
+stays green without a cluster.
 
 `make vet` also vets for `GOOS=linux`. That matters: everything that touches
 netlink is behind a Linux build tag, so a developer on another platform never

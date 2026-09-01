@@ -652,3 +652,23 @@ func (p *Pool) Stats() map[string]int {
 
 // podFor is a convenience for strategies that need the pod.
 func podFor(req drivers.PodVIFRequest) *corev1.Pod { return req.Pod }
+
+// Populate primes the pool for one node and network before any pod asks.
+//
+// Without it the first pod scheduled onto a node in a new namespace pays for a
+// synchronous bulk create; with it that cost is moved to namespace creation,
+// where nothing is waiting on it. Doing nothing when the pool is already at
+// ports_pool_min makes this safe to call again.
+func (p *Pool) Populate(ctx context.Context, node *corev1.Node, req drivers.PodVIFRequest) error {
+	host, err := p.strategy.HostKeyForNode(node)
+	if err != nil {
+		return err
+	}
+	netID, ok := req.Subnets.NetworkID()
+	if !ok {
+		return fmt.Errorf("pool: subnets to prime span more than one network")
+	}
+
+	req.HostID = host
+	return p.populate(ctx, key{Host: host, ProjectID: req.ProjectID, NetworkID: netID}, req)
+}
