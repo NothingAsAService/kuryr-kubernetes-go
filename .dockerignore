@@ -1,0 +1,10 @@
+# Everything the image build has no use for. A small context is what makes an
+# incremental rebuild fast.
+bin/
+dist/
+cover.out
+.git/
+.github/
+config/
+test/
+*.md

@@ -1,0 +1,8 @@
+# The four CRDs Kuryr owns. `make install` applies exactly this.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - bases/openstack.org_kuryrports.yaml
+  - bases/openstack.org_kuryrnetworks.yaml
+  - bases/openstack.org_kuryrnetworkpolicies.yaml
+  - bases/openstack.org_kuryrloadbalancers.yaml

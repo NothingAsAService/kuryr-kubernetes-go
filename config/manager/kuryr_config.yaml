@@ -1,0 +1,121 @@
+# The one configuration file both binaries read.
+#
+# It is the same kuryr.conf the Python implementation used: operators already
+# have these files and their tooling already templates them, so the Go rewrite
+# parses the same INI rather than inventing a format. Every placeholder marked
+# REQUIRED has to be filled in before this will start.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config
+  namespace: system
+  labels:
+    app.kubernetes.io/name: kuryr
+data:
+  kuryr.conf: |
+    [DEFAULT]
+    debug = false
+
+    [kubernetes]
+    # Which parts of Kuryr run. Handlers come in pairs: one writes the intent
+    # as a CRD, the other makes OpenStack match it. Enabling half a pair is
+    # rejected at startup rather than silently doing nothing.
+    enabled_handlers = vif,kuryrport,namespace,kuryrnetwork,policy,kuryrnetworkpolicy,service,kuryrloadbalancer
+
+    pod_project_driver = default
+    service_project_driver = default
+    namespace_project_driver = default
+
+    # namespace gives every Kubernetes namespace its own Neutron subnet,
+    # which is what lets a NetworkPolicy selecting a whole namespace become
+    # one security group rule instead of one per pod.
+    pod_subnets_driver = namespace
+    service_subnets_driver = default
+
+    # policy makes security groups follow NetworkPolicy. Both of these must
+    # say policy together, or groups are created but never applied.
+    pod_security_groups_driver = policy
+    service_security_groups_driver = policy
+
+    # neutron-vif for bare metal nodes, nested-vlan for pods inside node VMs.
+    pod_vif_driver = neutron-vif
+
+    # neutron is the ports pool; noop creates a port per pod on demand.
+    # Pooling trades Neutron quota for pod start latency.
+    vif_pool_driver = neutron
+
+    multi_vif_drivers = noop
+
+    # Active/passive HA through a Lease. The --leader-elect flag overrides
+    # this when it is passed.
+    controller_ha = true
+
+    [neutron_defaults]
+    # REQUIRED: the OpenStack project everything is created in.
+    project = <project-uuid>
+    # REQUIRED unless pod_subnets_driver is namespace.
+    pod_subnet = <pod-subnet-uuid>
+    # REQUIRED: the Neutron subnet the cluster service CIDR is carved from.
+    service_subnet = <service-subnet-uuid>
+    # REQUIRED: the groups a pod gets when no NetworkPolicy selects it.
+    pod_security_groups = <security-group-uuid>
+    ovs_bridge = br-int
+    # Only needed for Services of type LoadBalancer.
+    # external_svc_net = <external-network-uuid>
+    # Tags put on every resource Kuryr creates, which is how an operator
+    # tells them apart from everything else in the project.
+    resource_tags = kuryr
+
+    [namespace_subnet]
+    # REQUIRED by pod_subnets_driver = namespace.
+    pod_router = <router-uuid>
+    pod_subnet_pool = <subnet-pool-uuid>
+
+    [pod_vif_nested]
+    # The subnets the Kubernetes nodes live on. NetworkPolicy security groups
+    # always allow ingress from them, so kubelet probes keep working on an
+    # otherwise isolated pod.
+    # worker_nodes_subnets = <node-subnet-uuid>
+
+    [octavia_defaults]
+    # L3 routes load balancer traffic to members; L2 bridges it and needs the
+    # backends' own subnets.
+    member_mode = L3
+    lb_algorithm = ROUND_ROBIN
+    # Only meaningful with the Amphora provider, which rewrites the source
+    # address so a backend policy cannot see the real client.
+    enforce_sg_rules = true
+
+    [vif_pool]
+    ports_pool_min = 5
+    ports_pool_max = 0
+    ports_pool_batch = 10
+    ports_pool_update_frequency = 20
+
+    [cni_daemon]
+    bind_address = 127.0.0.1:5036
+    vif_annotation_timeout = 60
+    # The daemon runs in a container, so host namespace paths need
+    # translating to where /proc is mounted inside it.
+    docker_mode = true
+    netns_proc_dir = /host_proc
+
+    [prometheus_exporter]
+    # The controller's Deployment passes --metrics-bind-address=:8443 and
+    # serves over TLS with authentication, so this port only takes effect
+    # when that flag is removed. The CNI agent has no such flag: it is
+    # hostNetwork and node-local, and serves plaintext on this port.
+    controller_exporter_port = 9998
+    cni_exporter_port = 9999
+
+    [neutron]
+    # REQUIRED: Keystone credentials. Any value left empty falls back to the
+    # matching OS_* environment variable, so an application credential can be
+    # injected from a Secret instead of being written here.
+    auth_url = <keystone-url>
+    username = <username>
+    password = <password>
+    project_name = <project>
+    user_domain_name = Default
+    project_domain_name = Default
+    region_name = RegionOne

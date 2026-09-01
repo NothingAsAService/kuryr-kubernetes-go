@@ -1,0 +1,28 @@
+# A KuryrLoadBalancer is the Octavia side of a Service. The service
+# controller writes the spec from the Service and its EndpointSlices.
+apiVersion: openstack.org/v1
+kind: KuryrLoadBalancer
+metadata:
+  name: example-service
+  namespace: default
+  labels:
+    app.kubernetes.io/name: kuryr
+spec:
+  ip: 10.96.0.42
+  type: ClusterIP
+  projectID: 00000000000000000000000000000000
+  subnetID: 00000000-0000-0000-0000-000000000000
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: "8080"
+  subsets:
+    - addresses:
+        - ip: 10.0.1.5
+          ready: true
+      ports:
+        - name: http
+          protocol: TCP
+          port: 80
+          targetPort: "8080"

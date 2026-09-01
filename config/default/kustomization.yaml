@@ -1,0 +1,31 @@
+# The whole deployment: CRDs, RBAC, the controller and the node agent.
+#
+# `make deploy` applies exactly this. Everything lands in kube-system: Kuryr
+# is the cluster's CNI plugin, so it has to come up alongside the rest of the
+# control plane rather than in a namespace of its own that nothing can reach
+# until Kuryr is already working.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: kube-system
+namePrefix: kuryr-
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: kuryr
+      app.kubernetes.io/managed-by: kustomize
+
+resources:
+  # Order matters on a first apply: the informer cache fails to start if the
+  # types it watches do not exist, and RBAC has to be in place before the
+  # workloads that use it.
+  - ../crd
+  - ../rbac
+  - ../manager
+  - ../cni
+  - metrics_service.yaml
+
+# Uncomment to scrape the controller with the Prometheus operator. It is off
+# by default because it needs the operator's CRDs to be installed already.
+#  - ../prometheus

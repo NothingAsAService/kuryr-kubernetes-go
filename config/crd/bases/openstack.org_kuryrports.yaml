@@ -1,0 +1,344 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: kuryrports.openstack.org
+spec:
+  group: openstack.org
+  names:
+    kind: KuryrPort
+    listKind: KuryrPortList
+    plural: kuryrports
+    shortNames:
+    - kp
+    singular: kuryrport
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: Pod UID
+      jsonPath: .spec.podUid
+      name: PodUID
+      type: string
+    - description: Node the pod runs on
+      jsonPath: .spec.podNodeName
+      name: Node
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Active")].status
+      name: Active
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          KuryrPort is the Neutron side of a Kubernetes pod. It is created by the pod
+          controller and reconciled by the kuryrport controller, and it is the only
+          channel through which the controller talks to the CNI daemon.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: KuryrPortSpec is the immutable description of the pod a KuryrPort
+              serves.
+            properties:
+              podNodeName:
+                description: PodNodeName is the node the pod was scheduled to.
+                type: string
+              podStatic:
+                description: |-
+                  PodStatic marks a static (mirror) pod. Static pods report a different
+                  UID through the API than the one the CRI passes to CNI, so the UID
+                  check has to be skipped for them.
+                type: boolean
+              podUid:
+                description: |-
+                  PodUID pins this KuryrPort to one incarnation of the pod. A StatefulSet
+                  pod keeps its name across restarts but gets a fresh UID, so name alone
+                  cannot tell a live pod from a dead one.
+                type: string
+            required:
+            - podNodeName
+            - podUid
+            type: object
+          status:
+            description: KuryrPortStatus is the OpenStack side of the pod, as it actually
+              exists.
+            properties:
+              conditions:
+                description: |-
+                  Conditions reports provisioning progress. The Python implementation
+                  leaned on Kubernetes Events for this, which are lossy and expire.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              securityGroups:
+                description: |-
+                  SecurityGroups are the groups currently applied to the ports. Recording
+                  them is what lets the controller tell a real policy change from a
+                  reconcile that changed nothing, so a running pod's ports are only
+                  rewritten when the groups actually differ.
+                items:
+                  type: string
+                type: array
+              vifs:
+                additionalProperties:
+                  description: PortVIF is one interface attached to a pod.
+                  properties:
+                    default:
+                      description: Default marks the interface that carries the pod
+                        default route.
+                      type: boolean
+                    vif:
+                      description: VIF is the binding information for this interface.
+                      properties:
+                        active:
+                          description: |-
+                            Active reports whether Neutron has moved the port to ACTIVE. The CNI
+                            daemon holds the ADD call until this flips true.
+                          type: boolean
+                        address:
+                          description: Address is the port MAC address.
+                          type: string
+                        bridge:
+                          description: |-
+                            Bridge is the OVS or Linux bridge to plug into. Set for the ovs and
+                            bridge types only.
+                          type: string
+                        dpdk:
+                          description: DPDK is set for the nested-dpdk type only.
+                          properties:
+                            devDriver:
+                              description: DevDriver is the userspace driver the device
+                                is rebound to.
+                              type: string
+                            l3Setup:
+                              description: |-
+                                L3Setup tells the CNI whether to configure addresses and routes. A DPDK
+                                pod usually programs its own dataplane instead.
+                              type: boolean
+                            pciAddress:
+                              description: PCIAddress is the address of the device
+                                handed to the pod.
+                              type: string
+                          type: object
+                        hasTrafficFiltering:
+                          description: |-
+                            HasTrafficFiltering reports whether Neutron applies security groups on
+                            the port itself.
+                          type: boolean
+                        id:
+                          description: ID is the Neutron port UUID.
+                          type: string
+                        network:
+                          description: Network is the network and subnets this port
+                            lives on.
+                          properties:
+                            id:
+                              description: ID is the Neutron network UUID.
+                              type: string
+                            mtu:
+                              description: |-
+                                MTU is the network MTU. The CNI binding refuses to plug a VIF whose MTU
+                                exceeds the node uplink MTU, so this must be accurate.
+                              format: int32
+                              type: integer
+                            name:
+                              description: Name is the human readable network name.
+                              type: string
+                            subnets:
+                              description: Subnets are the subnets this port holds
+                                addresses on.
+                              items:
+                                description: |-
+                                  Subnet is one Neutron subnet as seen from a pod.
+
+                                  Unlike the os-vif Subnet this carries the subnet ID. The Python code kept
+                                  the ID only in the enclosing map key, which forced every consumer to thread
+                                  that map along with the object.
+                                properties:
+                                  cidr:
+                                    description: CIDR is the subnet range, for example
+                                      10.0.1.0/24.
+                                    type: string
+                                  dns:
+                                    description: DNS holds the subnet nameservers.
+                                    items:
+                                      type: string
+                                    type: array
+                                  gateway:
+                                    description: Gateway is the subnet gateway address,
+                                      empty when the subnet has none.
+                                    type: string
+                                  id:
+                                    description: ID is the Neutron subnet UUID.
+                                    type: string
+                                  ips:
+                                    description: IPs are the addresses allocated to
+                                      this port within the subnet.
+                                    items:
+                                      type: string
+                                    type: array
+                                  routes:
+                                    description: Routes holds the subnet host routes.
+                                    items:
+                                      description: Route is a static route pushed
+                                        into the pod network namespace.
+                                      properties:
+                                        destination:
+                                          description: Destination is the CIDR the
+                                            route applies to.
+                                          type: string
+                                        nextHop:
+                                          description: NextHop is the gateway address
+                                            for Destination.
+                                          type: string
+                                      required:
+                                      - destination
+                                      - nextHop
+                                      type: object
+                                    type: array
+                                required:
+                                - cidr
+                                type: object
+                              type: array
+                          required:
+                          - id
+                          type: object
+                        parentPortID:
+                          description: ParentPortID is the trunk parent port. Set
+                            for nested types only.
+                          type: string
+                        preserveOnDelete:
+                          description: PreserveOnDelete keeps the host interface when
+                            the pod goes away.
+                          type: boolean
+                        type:
+                          description: Type selects how this VIF is bound on the node.
+                          enum:
+                          - ovs
+                          - bridge
+                          - nested-vlan
+                          - nested-macvlan
+                          - nested-dpdk
+                          - vhostuser
+                          type: string
+                        vhostUser:
+                          description: VHostUser is set for the vhostuser type only.
+                          properties:
+                            mode:
+                              description: Mode is client or server, from the hypervisor
+                                point of view.
+                              type: string
+                            path:
+                              description: Path is the socket path shared with the
+                                pod.
+                              type: string
+                          required:
+                          - path
+                          type: object
+                        vifName:
+                          description: VIFName is the host-side interface name derived
+                            from ID.
+                          type: string
+                        vlanID:
+                          description: VLANID is the trunk segmentation id. Set for
+                            nested-vlan only.
+                          maximum: 4094
+                          minimum: 1
+                          type: integer
+                      required:
+                      - active
+                      - address
+                      - id
+                      - network
+                      - type
+                      type: object
+                  required:
+                  - default
+                  - vif
+                  type: object
+                description: |-
+                  VIFs maps interface name to its binding information. The Python
+                  implementation stored serialized oslo.versionedobjects here; this is a
+                  typed structure that the API server can validate.
+                type: object
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

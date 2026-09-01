@@ -1,0 +1,122 @@
+# kuryr-controller: the OpenStack-facing half of Kuryr.
+#
+# Two replicas with leader election. Only the leader reconciles, because two
+# controllers acting on the same pod would both create Neutron ports and only
+# one would win the status write, leaking the other. The standby exists so a
+# node failure costs a lease timeout rather than a restart.
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/name: kuryr
+    pod-security.kubernetes.io/enforce: privileged
+  name: system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+  namespace: system
+  labels:
+    app.kubernetes.io/name: kuryr
+    app.kubernetes.io/component: controller
+    control-plane: controller-manager
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kuryr
+      app.kubernetes.io/component: controller
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        app.kubernetes.io/name: kuryr
+        app.kubernetes.io/component: controller
+        control-plane: controller-manager
+    spec:
+      serviceAccountName: controller-manager
+      # Kuryr is the cluster's CNI plugin, so the controller cannot use the
+      # pod network it is itself responsible for creating. It talks only to
+      # the Kubernetes and OpenStack APIs.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      priorityClassName: system-cluster-critical
+      # The controller has to run before any pod can get an address, which
+      # includes running on a node that is not ready yet precisely because
+      # no CNI plugin is working on it.
+      tolerations:
+        - operator: Exists
+      affinity:
+        podAntiAffinity:
+          # Two replicas on one node share a host network stack, so they
+          # would fight over the metrics and probe ports, and the node would
+          # be a single point of failure anyway.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: kuryr
+                  app.kubernetes.io/component: controller
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: controller:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config-file=/etc/kuryr/kuryr.conf
+            - --leader-elect
+            - --health-probe-bind-address=:8081
+            - --metrics-bind-address=:8443
+            - --metrics-secure=true
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+            - name: probes
+              containerPort: 8081
+              protocol: TCP
+          # Liveness is just the process. Readiness also probes Neutron, so a
+          # rollout stops rather than proceeding into an OpenStack outage.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probes
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probes
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kuryr
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: config

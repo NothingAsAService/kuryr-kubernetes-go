@@ -1,0 +1,20 @@
+# Build output
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test and coverage output
+*.test
+cover.out
+cover.html
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# envtest downloads
+testbin/

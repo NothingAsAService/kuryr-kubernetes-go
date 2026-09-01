@@ -1,0 +1,119 @@
+# kuryr-cni: one agent per node.
+#
+# It does two things: it installs the kuryr-cni plugin binary onto the host so
+# the container runtime can call it, and it runs the daemon that binds
+# interfaces on behalf of that plugin. Both need host access, which is why
+# this pod is privileged where the controller is not.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cni
+  namespace: system
+  labels:
+    app.kubernetes.io/name: kuryr
+    app.kubernetes.io/component: cni
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kuryr
+      app.kubernetes.io/component: cni
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kuryr
+        app.kubernetes.io/component: cni
+    spec:
+      serviceAccountName: cni
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      priorityClassName: system-node-critical
+      # This has to run on every node, including ones that are NotReady
+      # precisely because no CNI plugin is installed on them yet.
+      tolerations:
+        - operator: Exists
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: cni
+          image: cni:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            # The daemon serves only the pods of its own node and filters its
+            # informer cache by this name. Getting it wrong means it sees no
+            # pods at all rather than the wrong ones.
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: metrics
+              containerPort: 9999
+            - name: probes
+              containerPort: 8090
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probes
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probes
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            # Creating veth pairs, moving them between network namespaces and
+            # writing to sysfs is what a CNI node agent does. It cannot be
+            # done unprivileged.
+            privileged: true
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kuryr
+              readOnly: true
+            - name: bin
+              mountPath: /opt/cni/bin
+            - name: net-conf
+              mountPath: /etc/cni/net.d
+            # The daemon enters pod network namespaces, which it reaches
+            # through the host /proc. See [cni_daemon]netns_proc_dir.
+            - name: proc
+              mountPath: /host_proc
+            # ovs-vsctl talks to the switch over this socket.
+            - name: openvswitch
+              mountPath: /var/run/openvswitch
+            # cri-o keeps its network namespaces here rather than under /proc.
+            - name: netns
+              mountPath: /run/netns
+              mountPropagation: HostToContainer
+      volumes:
+        - name: config
+          configMap:
+            name: config
+        - name: bin
+          hostPath:
+            path: /opt/cni/bin
+            type: DirectoryOrCreate
+        - name: net-conf
+          hostPath:
+            path: /etc/cni/net.d
+            type: DirectoryOrCreate
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: openvswitch
+          hostPath:
+            path: /var/run/openvswitch
+        - name: netns
+          hostPath:
+            path: /run/netns
+            type: DirectoryOrCreate

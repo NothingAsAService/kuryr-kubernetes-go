@@ -1,0 +1,71 @@
+# golangci-lint v2 configuration.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - copyloopvar
+    - dupl
+    - errcheck # the standing rule for this tree: no error goes unhandled
+    - errorlint # %w, and errors.Is/As instead of == and type assertions
+    - goconst
+    - gocyclo
+    - govet
+    - ineffassign
+    - lll
+    - misspell
+    - nakedret
+    - prealloc
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+  settings:
+    dupl:
+      threshold: 200
+    gocyclo:
+      min-complexity: 20
+    lll:
+      line-length: 120
+    revive:
+      rules:
+        - name: comment-spacings
+        - name: error-strings
+        - name: exported
+          arguments:
+            - checkPrivateReceivers
+        - name: indent-error-flow
+        - name: var-naming
+  exclusions:
+    generated: lax
+    rules:
+      # Generated deepcopy code is not ours to style.
+      - path: zz_generated\..*\.go
+        linters: [lll, revive, dupl]
+      # Table-driven tests repeat by design, and a fixture line is easier to
+      # read whole than wrapped.
+      - path: '_test\.go'
+        linters: [dupl, lll, goconst, gocyclo]
+      # A kubebuilder marker has to be one line: controller-gen does not read
+      # continuations, so a long printcolumn description cannot be wrapped.
+      - source: '^// \+kubebuilder:'
+        linters: [lll]
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - opendev.org/openstack/kuryr-kubernetes
+  exclusions:
+    generated: lax

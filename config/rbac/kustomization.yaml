@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  # The controller's own identity and the permissions generated from the
+  # kubebuilder markers in the source.
+  - service_account.yaml
+  - role.yaml
+  - role_binding.yaml
+  # Leader election is namespaced: the Lease lives beside the Deployment, so
+  # this is a Role rather than a ClusterRole.
+  - leader_election_role.yaml
+  - leader_election_role_binding.yaml
+  # Serving metrics over TLS means the manager has to check the caller's
+  # token and authorisation itself, which needs these two APIs.
+  - metrics_auth_role.yaml
+  - metrics_auth_role_binding.yaml
+  # A role a scrape agent can be bound to. Nothing is bound to it here; it
+  # exists so an operator has something to grant Prometheus.
+  - metrics_reader_role.yaml
+  # The node agent runs as a separate, read-only identity.
+  - cni_service_account.yaml
+  - cni_role.yaml
+  - cni_role_binding.yaml

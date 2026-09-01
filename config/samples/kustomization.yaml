@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - kuryr_v1_kuryrnetwork.yaml
+  - kuryr_v1_kuryrport.yaml
+  - kuryr_v1_kuryrnetworkpolicy.yaml
+  - kuryr_v1_kuryrloadbalancer.yaml

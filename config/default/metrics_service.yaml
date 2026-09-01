@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: controller-manager-metrics-service
+  namespace: system
+  labels:
+    app.kubernetes.io/name: kuryr
+    app.kubernetes.io/component: controller
+    control-plane: controller-manager
+spec:
+  selector:
+    app.kubernetes.io/name: kuryr
+    app.kubernetes.io/component: controller
+    control-plane: controller-manager
+  ports:
+    - name: https
+      port: 8443
+      protocol: TCP
+      targetPort: 8443

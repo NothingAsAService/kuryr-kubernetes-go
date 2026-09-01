@@ -1,0 +1,27 @@
+# Scrapes the controller's TLS metrics endpoint. The certificate is
+# self-signed by the manager at startup, so the scrape has to be told to
+# accept it; if cert-manager is in play, replace insecureSkipVerify with a
+# caFile and a serverName.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: controller-manager-metrics-monitor
+  namespace: system
+  labels:
+    app.kubernetes.io/name: kuryr
+    app.kubernetes.io/component: controller
+    control-plane: controller-manager
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kuryr
+      app.kubernetes.io/component: controller
+      control-plane: controller-manager
+  endpoints:
+    - port: https
+      scheme: https
+      path: /metrics
+      interval: 30s
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        insecureSkipVerify: true

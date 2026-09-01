@@ -1,0 +1,10 @@
+{
+  "cniVersion": "1.0.0",
+  "name": "kuryr",
+  "plugins": [
+    {
+      "type": "kuryr-cni",
+      "daemonAddress": "127.0.0.1:5036"
+    }
+  ]
+}

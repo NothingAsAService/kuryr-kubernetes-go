@@ -1,0 +1,32 @@
+# Kuryr is active/passive: two controllers reconciling the same pod would both
+# create a Neutron port and only one would win the status write, leaking the
+# other. The Lease is what arbitrates, and it lives in the controller's own
+# namespace, so this is a Role and not a ClusterRole.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/name: kuryr
+    app.kubernetes.io/component: controller
+  name: leader-election-role
+  namespace: system
+rules:
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch

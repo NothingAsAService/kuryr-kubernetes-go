@@ -1,0 +1,51 @@
+# Kubebuilder project metadata.
+#
+# `layout` is the v4 (go.kubebuilder.io/v4) plugin, which is what places the
+# reconcilers under internal/controller/ and the kustomize bases under
+# config/. It is read by `kubebuilder create api` and by `kubebuilder alpha
+# generate`, so keeping it accurate is what lets the scaffolding tools be used
+# on this tree at all.
+#
+# `repo` is the Go module path, which stays on the upstream OpenStack import
+# path: this is a rewrite of kuryr-kubernetes, not a fork under a new name.
+# The directory it lives in is deliberately different so the two trees can sit
+# side by side.
+domain: openstack.org
+layout:
+- go.kubebuilder.io/v4
+projectName: kuryr
+repo: opendev.org/openstack/kuryr-kubernetes
+version: "3"
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: openstack.org
+  kind: KuryrPort
+  path: opendev.org/openstack/kuryr-kubernetes/api/v1
+  version: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: openstack.org
+  kind: KuryrNetwork
+  path: opendev.org/openstack/kuryr-kubernetes/api/v1
+  version: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: openstack.org
+  kind: KuryrNetworkPolicy
+  path: opendev.org/openstack/kuryr-kubernetes/api/v1
+  version: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: openstack.org
+  kind: KuryrLoadBalancer
+  path: opendev.org/openstack/kuryr-kubernetes/api/v1
+  version: v1

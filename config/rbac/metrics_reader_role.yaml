@@ -1,0 +1,11 @@
+# Nothing is bound to this here. It exists so an operator has one object to
+# grant their scrape agent instead of hand-writing the non-resource URL rule.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: metrics-reader
+rules:
+  - nonResourceURLs:
+      - "/metrics"
+    verbs:
+      - get

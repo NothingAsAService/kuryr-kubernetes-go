@@ -1,0 +1,30 @@
+# Kuryr enforces NetworkPolicy itself, through Neutron security groups, so
+# this object is enforced by the very controller it protects. That is fine
+# once the cluster is up, and it is the reason it is not in the default
+# overlay: applying it before Kuryr is running would have nothing to enforce
+# it, and applying it while Kuryr is broken would be the wrong time to
+# discover that the scrape path is closed.
+#
+# Apply it with: kubectl apply -k config/network-policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-metrics-traffic
+  namespace: system
+  labels:
+    app.kubernetes.io/name: kuryr
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kuryr
+      app.kubernetes.io/component: controller
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              metrics: enabled
+      ports:
+        - port: 8443
+          protocol: TCP

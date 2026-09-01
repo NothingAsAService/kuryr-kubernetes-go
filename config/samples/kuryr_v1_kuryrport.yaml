@@ -1,0 +1,12 @@
+# A KuryrPort is created by the pod controller, one per pod that needs an
+# address. Its status carries the Neutron port the CNI agent then plugs in.
+apiVersion: openstack.org/v1
+kind: KuryrPort
+metadata:
+  name: example-pod
+  namespace: default
+  labels:
+    app.kubernetes.io/name: kuryr
+spec:
+  podUid: 00000000-0000-0000-0000-000000000000
+  podNodeName: worker-0

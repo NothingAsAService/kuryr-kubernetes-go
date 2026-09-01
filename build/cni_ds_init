@@ -1,0 +1,42 @@
+#!/bin/bash
+#
+# Installs the CNI plugin onto the host, then runs the daemon in the
+# foreground so the kubelet's process supervision applies to it.
+#
+# The plugin binary and its conflist are removed first. A partially written
+# binary left by a killed container would be executed by the runtime on the
+# next pod, so replacing rather than overwriting is the safe order.
+set -euo pipefail
+
+CNI_BIN_DIR="${CNI_BIN_DIR:-/opt/cni/bin}"
+CNI_CONF_DIR="${CNI_CONF_DIR:-/etc/cni/net.d}"
+CNI_CONF_NAME="${CNI_CONF_NAME:-10-kuryr.conflist}"
+KURYR_CONF="${KURYR_CONF:-/etc/kuryr/kuryr.conf}"
+
+cleanup() {
+    rm -f "${CNI_CONF_DIR}/${CNI_CONF_NAME}"
+    rm -f "${CNI_BIN_DIR}/kuryr-cni"
+}
+
+install_plugin() {
+    # Write to a temporary name and rename into place: rename is atomic, so
+    # the runtime never sees a half-copied binary.
+    install -m 0755 /kuryr-cni "${CNI_BIN_DIR}/.kuryr-cni.tmp"
+    mv -f "${CNI_BIN_DIR}/.kuryr-cni.tmp" "${CNI_BIN_DIR}/kuryr-cni"
+
+    # A conflist mounted from a ConfigMap wins over the built-in template,
+    # which is how a deployment overrides the daemon address or the plugin
+    # chain without rebuilding the image.
+    local template="${CNI_CONF_DIR}/kuryr.conflist.template"
+    if [ ! -f "${template}" ]; then
+        template="/etc/kuryr-cni/kuryr.conflist.template"
+    fi
+    cp "${template}" "${CNI_CONF_DIR}/.${CNI_CONF_NAME}.tmp"
+    mv -f "${CNI_CONF_DIR}/.${CNI_CONF_NAME}.tmp" "${CNI_CONF_DIR}/${CNI_CONF_NAME}"
+}
+
+cleanup
+install_plugin
+
+# exec, so signals from the kubelet reach the daemon rather than this script.
+exec /usr/bin/kuryr-daemon --config-file "${KURYR_CONF}" "$@"

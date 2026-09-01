@@ -1,0 +1,28 @@
+# A KuryrNetworkPolicy is the translation of one NetworkPolicy into the
+# security group rules that enforce it. The networkpolicy controller writes
+# it; nothing outside Kuryr should.
+apiVersion: openstack.org/v1
+kind: KuryrNetworkPolicy
+metadata:
+  name: allow-frontend
+  namespace: default
+  labels:
+    app.kubernetes.io/name: kuryr
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  policyTypes:
+    - Ingress
+  ingressSgRules:
+    - sgRule:
+        direction: ingress
+        etherType: IPv4
+        protocol: tcp
+        portRangeMin: 8080
+        portRangeMax: 8080
+        remoteIPPrefix: 10.0.1.5/32
+      affectedPods:
+        - podIP: 10.0.1.5
+          podNamespace: default
+  egressSgRules: []

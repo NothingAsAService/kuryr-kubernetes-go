@@ -1,0 +1,14 @@
+# A KuryrNetwork is created by the namespace controller, not by hand. This
+# sample exists to show the shape the controller writes.
+apiVersion: openstack.org/v1
+kind: KuryrNetwork
+metadata:
+  name: ns-default
+  namespace: default
+  labels:
+    app.kubernetes.io/name: kuryr
+spec:
+  nsName: default
+  projectId: 00000000000000000000000000000000
+  nsLabels:
+    kubernetes.io/metadata.name: default

@@ -1,0 +1,30 @@
+# The node agent is read-only on purpose.
+#
+# It watches the KuryrPorts of its own node and plugs the interfaces the
+# controller already decided on; it never decides anything itself. Granting it
+# write access would widen the blast radius of a compromised node agent -- and
+# every node runs one -- without enabling anything it needs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: kuryr
+    app.kubernetes.io/component: cni
+  name: cni-role
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - openstack.org
+    resources:
+      - kuryrports
+    verbs:
+      - get
+      - list
+      - watch
