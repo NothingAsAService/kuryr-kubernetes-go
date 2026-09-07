@@ -47,6 +47,7 @@ to start rather than a pod stuck in `ContainerCreating`.
 | `service` handler requires `service_subnet` (with the `default` service subnet driver) | Octavia needs somewhere to hold the VIP |
 | `pod_subnets_driver = default` requires `pod_subnet` | Pods need a subnet to get addresses from |
 | `pod_subnets_driver = namespace` requires the `kuryrnetwork` handler and `pod_router` | Nothing would create the per-namespace subnets |
+| `pod_subnets_driver = annotation` inherits its fallback driver's requirements, and the fallback may not be `annotation` | The annotation only overrides the pods that ask for a subnet; the rest still need a driver |
 | `pod_security_groups_driver = policy` requires the `policy` handler, and vice versa | The driver applies the groups; the handler creates them. Either alone silently enforces nothing |
 | `pod_security_groups_driver = policy` requires `service_security_groups_driver = policy` | Otherwise a load balancer would not inherit the policy of the pods behind it |
 | `pod_vif_driver = nested-dpdk` requires `vif_pool_driver = noop` | Each DPDK interface is attached to one named node VM, so there is no interchangeable unbound port to pool |
@@ -63,7 +64,7 @@ Which parts of Kuryr run, and which driver fills each slot.
 | `service_project_driver` | `default` | Same, for Services |
 | `namespace_project_driver` | `default` | Same, for Namespaces |
 | `network_policy_project_driver` | `default` | Same, for NetworkPolicies. Only consulted when the namespace has no KuryrNetwork to read the project from |
-| `pod_subnets_driver` | `default` | `default` puts every pod on `pod_subnet`; `namespace` gives each Kubernetes namespace its own Neutron subnet |
+| `pod_subnets_driver` | `default` | `default` puts every pod on `pod_subnet`; `namespace` gives each Kubernetes namespace its own Neutron subnet; `annotation` lets a pod name an existing subnet with `openstack.org/kuryr-subnet-id` and defers to `[annotation_subnet]fallback_driver` for the rest. See [Per-pod subnets](#per-pod-subnets) |
 | `service_subnets_driver` | `default` | Only `default` is implemented: the subnet from `[neutron_defaults]service_subnet` |
 | `pod_security_groups_driver` | `default` | `default` applies a fixed list; `policy` makes the groups follow NetworkPolicy |
 | `service_security_groups_driver` | `default` | `default` applies a fixed list; `policy` gives a load balancer the groups of the pods it fronts |
@@ -135,6 +136,72 @@ Only used when `pod_subnets_driver = namespace`.
 | --- | --- | --- |
 | `pod_router` | — | **Required** by that driver. The router each per-namespace subnet is attached to |
 | `pod_subnet_pool` | — | The subnet pool new namespace subnets are carved from |
+
+## `[annotation_subnet]`
+
+Only used when `pod_subnets_driver = annotation`.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `fallback_driver` | `default` | The driver serving pods that carry no subnet annotation. Normally `default` or `namespace`; may not be `annotation` |
+| `enforce_project` | `true` | Refuse a subnet owned by a project other than the pod's. Turning this off lets anyone who can set a pod annotation put a port on any subnet the controller's credentials can reach |
+
+### Per-pod subnets
+
+The `annotation` subnet driver lets a workload choose which **existing**
+Neutron subnet its ports get addresses from. It never creates a subnet: the
+annotation names one that is already there, and a subnet that does not exist
+is an error, not something to provision.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-0
+  namespace: tenant-a
+  annotations:
+    openstack.org/kuryr-subnet-id: 8d1a2f4e-...   # an existing Neutron subnet
+```
+
+The subnet is resolved in this order, and the first answer wins:
+
+1. the pod's own `openstack.org/kuryr-subnet-id` annotation;
+2. the same annotation on the pod's namespace, which is how a tenant pins
+   every pod in a namespace to one subnet without repeating it per pod;
+3. `fallback_driver`, exactly as if the annotation driver were not configured.
+
+**Tenancy.** With `enforce_project` on, a pod may only name a subnet owned by
+the project its own resources go to — the project `pod_project_driver`
+resolved. In a multi-tenant cluster, pair this with
+`pod_project_driver = annotation` so each namespace carries the
+`openstack.org/kuryr-project` annotation of its tenant; a pod naming another
+tenant's subnet is then refused rather than served. The refusal is permanent,
+not retried, and appears as a `SubnetUnavailable` condition on the pod's
+KuryrPort:
+
+```console
+$ kubectl describe kuryrport -n tenant-a web-0
+...
+  Conditions:
+    Type:     Provisioned
+    Status:   False
+    Reason:   SubnetUnavailable
+    Message:  subnet 8d1a2f4e-... belongs to project b2..., but the pod belongs
+              to project a1...; a pod may only ask for a subnet in its own project
+```
+
+**Timing.** The annotation is read once, when the port is created. Changing it
+on a running pod does nothing; the pod has to be recreated.
+
+**Pools.** `vif_pool_driver = neutron` keeps a separate pool per subnet, so a
+pod is never handed a pre-created port from a subnet it did not ask for. Each
+distinct subnet in use costs its own `ports_pool_min` ports, which is worth
+knowing before annotating pods onto many subnets.
+
+**NetworkPolicy.** A `namespaceSelector` collapses into one CIDR rule per
+namespace only when every pod in a namespace is guaranteed to be on that
+namespace's subnet. The annotation driver removes that guarantee, so with it
+configured the policy translation falls back to per-pod rules.
 
 ## `[pod_vif_nested]`
 

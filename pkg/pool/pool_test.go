@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -51,20 +53,38 @@ func newFakeDriver(name string) *fakeVIFDriver {
 
 func (f *fakeVIFDriver) Name() string { return f.name }
 
-func (f *fakeVIFDriver) makeVIF() *kuryrv1.VIF {
+// makeVIF answers with a port on the subnets that were asked for, the way
+// Neutron would. Echoing the request back matters for pooling: a released
+// port finds its pool from the subnets recorded on its VIF.
+func (f *fakeVIFDriver) makeVIF(req drivers.PodVIFRequest) *kuryrv1.VIF {
 	f.next++
 	id := fmt.Sprintf("port-%d", f.next)
 	f.created = append(f.created, id)
+
+	subnets := []kuryrv1.Subnet{{ID: testSubID, CIDR: "10.1.0.0/24", IPs: []string{"10.1.0.5"}}}
+	if len(req.Subnets) > 0 {
+		subnets = make([]kuryrv1.Subnet, 0, len(req.Subnets))
+		for _, id := range slices.Sorted(maps.Keys(req.Subnets)) {
+			subnets = append(subnets, kuryrv1.Subnet{
+				ID:   id,
+				CIDR: req.Subnets[id].CIDR,
+				IPs:  []string{"10.1.0.5"},
+			})
+		}
+	}
+
+	netID := testNetID
+	if id, ok := req.Subnets.NetworkID(); ok {
+		netID = id
+	}
+
 	return &kuryrv1.VIF{
 		Type:    kuryrv1.VIFTypeOVS,
 		ID:      id,
 		Address: fmt.Sprintf("fa:16:3e:00:00:%02x", f.next),
 		Bridge:  "br-int",
 		Active:  true,
-		Network: kuryrv1.Network{
-			ID:      testNetID,
-			Subnets: []kuryrv1.Subnet{{ID: testSubID, CIDR: "10.1.0.0/24", IPs: []string{"10.1.0.5"}}},
-		},
+		Network: kuryrv1.Network{ID: netID, Subnets: subnets},
 	}
 }
 
@@ -74,7 +94,7 @@ func (f *fakeVIFDriver) RequestVIF(_ context.Context, req drivers.PodVIFRequest)
 	if f.requestErr != nil {
 		return nil, f.requestErr
 	}
-	return f.makeVIF(), nil
+	return f.makeVIF(req), nil
 }
 
 func (f *fakeVIFDriver) RequestVIFs(_ context.Context, req drivers.PodVIFRequest, n int) ([]*kuryrv1.VIF, error) {
@@ -85,7 +105,7 @@ func (f *fakeVIFDriver) RequestVIFs(_ context.Context, req drivers.PodVIFRequest
 	}
 	out := make([]*kuryrv1.VIF, 0, n)
 	for i := 0; i < n; i++ {
-		out = append(out, f.makeVIF())
+		out = append(out, f.makeVIF(req))
 	}
 	return out, nil
 }
@@ -477,6 +497,48 @@ func TestRecycleReturnsPortsToThePool(t *testing.T) {
 	}
 }
 
+// Two subnets can live on one network, so the network alone does not say
+// which addresses a pooled port holds. A pod that named subnet-2 through the
+// subnet annotation must not be handed a port with an address on subnet-1.
+func TestPoolsAreSeparatePerSubnet(t *testing.T) {
+	p, inner, _ := newTestPool(t, nil)
+	ctx := context.Background()
+	_ = p.Recover(ctx)
+
+	first, err := p.RequestVIF(ctx, testRequest("sg-a"))
+	if err != nil {
+		t.Fatalf("RequestVIF on the default subnet: %v", err)
+	}
+
+	// A second subnet, on the same Neutron network as the first.
+	other := testRequest("sg-a")
+	other.Subnets = vif.SubnetSet{
+		"subnet-2": {ID: "subnet-2", NetworkID: testNetID, CIDR: "10.2.0.0/24"},
+	}
+
+	second, err := p.RequestVIF(ctx, other)
+	if err != nil {
+		t.Fatalf("RequestVIF on subnet-2: %v", err)
+	}
+
+	if got := subnetKeyOfVIF(second); got != "subnet-2" {
+		t.Errorf("the port served for subnet-2 holds subnets %q; a pod must never be "+
+			"given an address outside the subnet it asked for", got)
+	}
+	if second.ID == first.ID {
+		t.Fatal("both requests were served the same port")
+	}
+
+	stats := p.Stats()
+	if len(stats) != 2 {
+		t.Errorf("pools = %v, want one per subnet", stats)
+	}
+	if inner.createdCount() < 2*p.cfg.VIFPool.PortsPoolBatch {
+		t.Errorf("created %d ports, want a full batch for each of the two subnets",
+			inner.createdCount())
+	}
+}
+
 func TestRecycleRereadsSecurityGroups(t *testing.T) {
 	// A NetworkPolicy can rewrite the groups on a port while a pod holds it.
 	// Filing it back under the groups it had when it was handed out would
@@ -498,7 +560,7 @@ func TestRecycleRereadsSecurityGroups(t *testing.T) {
 		t.Fatalf("Recycle: %v", err)
 	}
 
-	k := key{Host: testNode, ProjectID: testProj, NetworkID: testNetID}
+	k := key{Host: testNode, ProjectID: testProj, NetworkID: testNetID, Subnets: testSubID}
 	p.mu.Lock()
 	b := p.available[k]
 	filed := ""
@@ -532,7 +594,7 @@ func TestRecycleDeletesWhenPoolIsFull(t *testing.T) {
 	cl.addPort(v.ID, []string{"sg-a"})
 
 	// Top the pool back up to its maximum before returning the port.
-	if err := p.populate(ctx, key{Host: testNode, ProjectID: testProj, NetworkID: testNetID},
+	if err := p.populate(ctx, key{Host: testNode, ProjectID: testProj, NetworkID: testNetID, Subnets: testSubID},
 		testRequest("sg-a")); err != nil {
 		t.Fatalf("populate: %v", err)
 	}

@@ -27,6 +27,13 @@ const (
 	// which is what several of the checks in Validate are about.
 	policyName = "policy"
 
+	// driverNamespace gives each Kubernetes namespace its own Neutron subnet.
+	driverNamespace = "namespace"
+
+	// driverAnnotation reads the choice from an annotation on the object, or
+	// on its namespace, rather than from kuryr.conf.
+	driverAnnotation = "annotation"
+
 	// driverNoop is the "do nothing" driver: no port pool, no extra
 	// interfaces. It is the default for both slots that accept it.
 	driverNoop = "noop"
@@ -34,18 +41,19 @@ const (
 
 // Config is the whole of kuryr.conf.
 type Config struct {
-	Kubernetes      Kubernetes
-	NeutronDefaults NeutronDefaults
-	OctaviaDefaults OctaviaDefaults
-	CNIDaemon       CNIDaemon
-	PodVIFNested    PodVIFNested
-	NestedDPDK      NestedDPDK
-	VIFPool         VIFPool
-	NamespaceSubnet NamespaceSubnet
-	Binding         Binding
-	VHostUser       VHostUser
-	Prometheus      Prometheus
-	Auth            Auth
+	Kubernetes       Kubernetes
+	NeutronDefaults  NeutronDefaults
+	OctaviaDefaults  OctaviaDefaults
+	CNIDaemon        CNIDaemon
+	PodVIFNested     PodVIFNested
+	NestedDPDK       NestedDPDK
+	VIFPool          VIFPool
+	NamespaceSubnet  NamespaceSubnet
+	AnnotationSubnet AnnotationSubnet
+	Binding          Binding
+	VHostUser        VHostUser
+	Prometheus       Prometheus
+	Auth             Auth
 }
 
 // Kubernetes is the [kubernetes] section: which handlers run and which
@@ -146,6 +154,21 @@ type NamespaceSubnet struct {
 	PodSubnetPool string
 }
 
+// AnnotationSubnet is the [annotation_subnet] section: the settings of the
+// annotation pod subnet driver, which lets a workload name the Neutron subnet
+// its ports come from.
+type AnnotationSubnet struct {
+	// FallbackDriver serves pods that carry no subnet annotation. The
+	// annotation is an override, so there still has to be a default underneath
+	// it -- normally "default" or "namespace".
+	FallbackDriver string
+	// EnforceProject refuses a subnet owned by a project other than the pod's.
+	// It defaults to on: without it, anyone able to set a pod annotation can
+	// put a port on any subnet the controller credentials can reach, which in
+	// a multi-tenant cluster means any tenant's.
+	EnforceProject bool
+}
+
 // Binding is the [binding] section.
 type Binding struct {
 	// LinkIface is the node uplink a nested VIF hangs off. When empty the
@@ -236,6 +259,10 @@ func Defaults() *Config {
 			PortsPoolUpdateFrequency: 20 * time.Second,
 			VIFPoolMapping:           map[string]string{},
 		},
+		AnnotationSubnet: AnnotationSubnet{
+			FallbackDriver: driverDefault,
+			EnforceProject: true,
+		},
 		VHostUser: VHostUser{
 			MountPoint: "/var/cni/vhostuser",
 			OVSVhuPath: "/var/run/openvswitch/",
@@ -324,6 +351,10 @@ func (c *Config) applyINI(f *ini.File) {
 	ns := f.Section("namespace_subnet")
 	str(ns, "pod_router", &c.NamespaceSubnet.PodRouter)
 	str(ns, "pod_subnet_pool", &c.NamespaceSubnet.PodSubnetPool)
+
+	as := f.Section("annotation_subnet")
+	str(as, "fallback_driver", &c.AnnotationSubnet.FallbackDriver)
+	boolean(as, "enforce_project", &c.AnnotationSubnet.EnforceProject)
 
 	nest := f.Section("pod_vif_nested")
 	list(nest, "worker_nodes_subnets", &c.PodVIFNested.WorkerNodesSubnets)
@@ -479,15 +510,8 @@ func (c *Config) validateDrivers(handlers map[string]bool) error {
 				"must be too, not %q: otherwise a load balancer would not inherit the policy "+
 				"of the pods behind it", c.Kubernetes.ServiceSecurityGroupsDriver)
 	}
-	if c.Kubernetes.PodSubnetsDriver == "namespace" && !handlers["kuryrnetwork"] {
-		return fmt.Errorf(
-			"[kubernetes]pod_subnets_driver=namespace requires the namespace and kuryrnetwork handlers")
-	}
-	if c.Kubernetes.PodSubnetsDriver == "namespace" && c.NamespaceSubnet.PodRouter == "" {
-		return fmt.Errorf("[namespace_subnet]pod_router is required by the namespace subnet driver")
-	}
-	if c.Kubernetes.PodSubnetsDriver == driverDefault && c.NeutronDefaults.PodSubnet == "" {
-		return fmt.Errorf("[neutron_defaults]pod_subnet is required by the default subnet driver")
+	if err := c.validatePodSubnetDrivers(handlers); err != nil {
+		return err
 	}
 	// The two halves of NetworkPolicy support. The driver is what puts a
 	// policy's security group on a pod, and the handlers are what create that
@@ -504,6 +528,63 @@ func (c *Config) validateDrivers(handlers map[string]bool) error {
 				"never applied to any pod", c.Kubernetes.PodSecurityGroupsDriver)
 	}
 	return nil
+}
+
+// validatePodSubnetDrivers checks what the pod subnet driver needs from the
+// rest of the file.
+//
+// The annotation driver only overrides the pods that ask for a subnet, so
+// whatever serves the rest still has to be configured. Every check below is
+// therefore made against the effective driver rather than the configured name.
+func (c *Config) validatePodSubnetDrivers(handlers map[string]bool) error {
+	if c.Kubernetes.PodSubnetsDriver == driverAnnotation &&
+		c.AnnotationSubnet.FallbackDriver == driverAnnotation {
+		return fmt.Errorf(
+			"[annotation_subnet]fallback_driver cannot be annotation; it names the driver " +
+				"serving pods that carry no subnet annotation")
+	}
+
+	switch c.effectivePodSubnetsDriver() {
+	case driverNamespace:
+		if !handlers["kuryrnetwork"] {
+			return fmt.Errorf(
+				"[kubernetes]pod_subnets_driver=namespace requires the namespace and " +
+					"kuryrnetwork handlers")
+		}
+		if c.NamespaceSubnet.PodRouter == "" {
+			return fmt.Errorf("[namespace_subnet]pod_router is required by the namespace subnet driver")
+		}
+	case driverDefault:
+		if c.NeutronDefaults.PodSubnet == "" {
+			return fmt.Errorf("[neutron_defaults]pod_subnet is required by the default subnet driver")
+		}
+	}
+	return nil
+}
+
+// effectivePodSubnetsDriver is the driver that decides a pod's subnet when
+// nothing annotates one. It is the configured driver, except under the
+// annotation driver, which is a decorator over a fallback.
+func (c *Config) effectivePodSubnetsDriver() string {
+	if c.Kubernetes.PodSubnetsDriver != driverAnnotation {
+		return c.Kubernetes.PodSubnetsDriver
+	}
+	if c.AnnotationSubnet.FallbackDriver == "" {
+		return driverDefault
+	}
+	return c.AnnotationSubnet.FallbackDriver
+}
+
+// PodsShareNamespaceSubnet reports whether every pod in a namespace is
+// guaranteed to hold an address on that namespace's own subnet.
+//
+// That guarantee is what lets a NetworkPolicy namespaceSelector collapse into
+// a single CIDR rule instead of one rule per pod. The annotation driver breaks
+// it -- a pod may be annotated onto a subnet of its tenant's choosing -- so
+// enabling it gives up the collapse rather than writing a rule that would miss
+// the annotated pods.
+func (c *Config) PodsShareNamespaceSubnet() bool {
+	return c.Kubernetes.PodSubnetsDriver == driverNamespace
 }
 
 // HandlerEnabled reports whether a named handler should run.

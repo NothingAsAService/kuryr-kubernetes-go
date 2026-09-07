@@ -133,7 +133,15 @@ func recoverBaremetal(ctx context.Context, p *Pool) error {
 			continue
 		}
 
-		k := key{Host: port.HostID, ProjectID: port.ProjectID, NetworkID: port.NetworkID}
+		// The subnets come from the VIF rather than from configuration: a
+		// recovered port belongs to the pool matching the addresses it
+		// actually holds, which is the only thing that makes it reusable.
+		k := key{
+			Host:      port.HostID,
+			ProjectID: port.ProjectID,
+			NetworkID: port.NetworkID,
+			Subnets:   subnetKeyOfVIF(v),
+		}
 		p.addRecovered(k, v, port.SecurityGroups)
 		recovered++
 	}
@@ -208,7 +216,12 @@ func recoverNested(ctx context.Context, p *Pool) error {
 				continue
 			}
 
-			k := key{Host: hostIP, ProjectID: port.ProjectID, NetworkID: port.NetworkID}
+			k := key{
+				Host:      hostIP,
+				ProjectID: port.ProjectID,
+				NetworkID: port.NetworkID,
+				Subnets:   subnetKeyOfVIF(v),
+			}
 			p.addRecovered(k, v, port.SecurityGroups)
 			recovered++
 		}

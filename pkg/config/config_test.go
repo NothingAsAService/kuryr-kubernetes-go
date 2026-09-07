@@ -270,3 +270,57 @@ func TestValidateRejectsPooledNestedDPDK(t *testing.T) {
 		t.Errorf("nested-dpdk with vif_pool_driver=noop should be accepted: %v", err)
 	}
 }
+
+func TestAnnotationSubnetDriverStillNeedsAFallback(t *testing.T) {
+	// The annotation driver only overrides pods that ask for a subnet, so
+	// whatever serves the rest has to be configured as usual.
+	cfg := loadShipped(t)
+	cfg.Kubernetes.PodSubnetsDriver = "annotation"
+	cfg.AnnotationSubnet.FallbackDriver = "default"
+	cfg.NeutronDefaults.PodSubnet = ""
+
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected pod_subnet to still be required behind the annotation driver")
+	}
+
+	cfg.NeutronDefaults.PodSubnet = "subnet-default"
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("annotation over the default driver should be accepted: %v", err)
+	}
+}
+
+func TestAnnotationSubnetDriverCannotFallBackToItself(t *testing.T) {
+	cfg := loadShipped(t)
+	cfg.Kubernetes.PodSubnetsDriver = "annotation"
+	cfg.AnnotationSubnet.FallbackDriver = "annotation"
+
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected an error for an annotation driver falling back to itself")
+	}
+}
+
+func TestAnnotationSubnetDriverInheritsTheFallbackRequirements(t *testing.T) {
+	// Falling back to the namespace driver drags in everything that driver
+	// needs, which is what would otherwise be missed by checking only the
+	// configured driver name.
+	cfg := loadShipped(t)
+	cfg.Kubernetes.PodSubnetsDriver = "annotation"
+	cfg.AnnotationSubnet.FallbackDriver = "namespace"
+	cfg.NamespaceSubnet.PodRouter = ""
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected pod_router to still be required behind the annotation driver")
+	}
+	if !strings.Contains(err.Error(), "pod_router") {
+		t.Errorf("error = %v, want it to name pod_router", err)
+	}
+}
+
+func TestAnnotationSubnetEnforcesProjectByDefault(t *testing.T) {
+	// The default has to be the safe one: with enforcement off, any user who
+	// can annotate a pod can put a port on another tenant's subnet.
+	if !Defaults().AnnotationSubnet.EnforceProject {
+		t.Error("[annotation_subnet]enforce_project should default to true")
+	}
+}

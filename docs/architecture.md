@@ -196,6 +196,11 @@ time, and a pod is handed one that already exists.
   below `ports_pool_min`.
 - A port handed back by a deleted pod is recycled rather than deleted, unless
   the pool is already at `ports_pool_max`.
+- A pool is identified by node, project and the *subnets* its ports hold
+  addresses on. The network alone is not enough: two subnets can share one, and
+  a pod that named a subnet through `openstack.org/kuryr-subnet-id` must never
+  be handed a port addressed on the other one. Each distinct subnet in use
+  therefore costs its own `ports_pool_min` ports.
 - Security groups are part of the pool key. A pooled port with the wrong groups
   can still be used — its groups are rewritten first — but an exact match is
   preferred.

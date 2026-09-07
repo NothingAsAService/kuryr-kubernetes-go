@@ -204,6 +204,12 @@ func (r *KuryrPortReconciler) provision(ctx context.Context, kp *kuryrv1.KuryrPo
 				"SubnetNotReady", err.Error())
 			return ctrl.Result{RequeueAfter: portActivationRequeue}, nil
 		}
+		// Anything else is a subnet the pod cannot have: an annotation naming
+		// a subnet that does not exist, or one belonging to another project.
+		// Waiting will not fix it, so say why on the object rather than only
+		// in the controller log, where the pod's owner cannot see it.
+		r.setCondition(ctx, kp, kuryrv1.KuryrPortConditionProvisioned, metav1.ConditionFalse,
+			"SubnetUnavailable", err.Error())
 		return ctrl.Result{}, fmt.Errorf("resolving subnets: %w", err)
 	}
 

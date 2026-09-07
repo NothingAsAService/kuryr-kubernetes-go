@@ -316,7 +316,7 @@ func setupPolicyControllers(mgr manager.Manager, cfg *config.Config,
 			Client: mgr.GetClient(),
 			// A namespaceSelector collapses to one rule per namespace only
 			// when namespaces actually have their own subnets.
-			NamespaceSubnets: cfg.Kubernetes.PodSubnetsDriver == "namespace",
+			NamespaceSubnets: cfg.PodsShareNamespaceSubnet(),
 		},
 	}
 	if err := npReconciler.SetupWithManager(mgr); err != nil {

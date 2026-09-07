@@ -27,7 +27,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		size: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "kuryr_ports_pool_size",
 			Help: "Free ports currently held in a pool.",
-		}, []string{"host", "project", "network"}),
+		}, []string{"host", "project", "network", "subnet"}),
 
 		createdPort: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kuryr_ports_pool_created_total",
@@ -62,7 +62,7 @@ func (m *Metrics) observePoolSize(k key, size int) {
 	if m == nil {
 		return
 	}
-	m.size.WithLabelValues(k.Host, k.ProjectID, k.NetworkID).Set(float64(size))
+	m.size.WithLabelValues(k.Host, k.ProjectID, k.NetworkID, k.Subnets).Set(float64(size))
 }
 
 func (m *Metrics) created(driver string, n int) {

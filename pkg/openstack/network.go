@@ -16,8 +16,12 @@ import (
 
 // Subnet is a Neutron subnet reduced to what a VIF needs.
 type Subnet struct {
-	ID          string
-	NetworkID   string
+	ID        string
+	NetworkID string
+	// ProjectID is the project that owns the subnet. Multi-tenant clusters
+	// check it before honouring a pod's subnet annotation, so that a pod
+	// cannot pull an address out of another tenant's subnet.
+	ProjectID   string
 	Name        string
 	CIDR        string
 	GatewayIP   string
@@ -27,6 +31,17 @@ type Subnet struct {
 	EnableDHCP  bool
 	SubnetPool  string
 	Description string
+}
+
+// firstNonEmpty returns the first non-empty argument, or "" if there is none.
+// Neutron spells several fields two ways depending on microversion.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // HostRoute is a static route advertised by a subnet.
@@ -108,8 +123,12 @@ func (c *Client) GetSubnet(ctx context.Context, id string) (*Subnet, error) {
 	}
 
 	s := &Subnet{
-		ID:          raw.ID,
-		NetworkID:   raw.NetworkID,
+		ID:        raw.ID,
+		NetworkID: raw.NetworkID,
+		// Neutron reports project_id on any API microversion worth running,
+		// but keeps tenant_id as its older spelling. Prefer the new one and
+		// fall back, rather than leaving the owner unknown.
+		ProjectID:   firstNonEmpty(raw.ProjectID, raw.TenantID),
 		Name:        raw.Name,
 		CIDR:        raw.CIDR,
 		GatewayIP:   raw.GatewayIP,

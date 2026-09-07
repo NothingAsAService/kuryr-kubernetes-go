@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -35,6 +36,7 @@ import (
 	"opendev.org/openstack/kuryr-kubernetes/pkg/config"
 	"opendev.org/openstack/kuryr-kubernetes/pkg/drivers"
 	"opendev.org/openstack/kuryr-kubernetes/pkg/openstack"
+	"opendev.org/openstack/kuryr-kubernetes/pkg/vif"
 )
 
 // ErrNotReady means the pool has not finished recovering pre-created ports
@@ -58,14 +60,50 @@ const populateTimeout = 7 * time.Minute
 // the pool into fragments that never match anything. Groups are handled one
 // level down instead, and a port can be moved between them with a single
 // update.
+//
+// Subnets are part of the key, and the network is not enough on its own. Two
+// subnets can share a network, and a pod that named one of them through the
+// subnet annotation must not be handed a port holding an address on the
+// other: the address would be routable but outside the range the tenant
+// asked for.
 type key struct {
 	Host      string
 	ProjectID string
 	NetworkID string
+	// Subnets is the canonical form of the subnet set the ports hold
+	// addresses on: sorted IDs joined by commas.
+	Subnets string
 }
 
 func (k key) String() string {
-	return fmt.Sprintf("%s/%s/%s", k.Host, k.ProjectID, k.NetworkID)
+	return fmt.Sprintf("%s/%s/%s/%s", k.Host, k.ProjectID, k.NetworkID, k.Subnets)
+}
+
+// makeSubnetKey is the canonical form of a subnet set, so that the same
+// subnets always name the same pool whatever order they arrive in.
+func makeSubnetKey(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	return strings.Join(slices.Sorted(slices.Values(ids)), ",")
+}
+
+// subnetKeyOf is makeSubnetKey for the subnets a driver resolved.
+func subnetKeyOf(subnets vif.SubnetSet) string {
+	return makeSubnetKey(slices.Collect(maps.Keys(subnets)))
+}
+
+// subnetKeyOfVIF is makeSubnetKey for a port that already exists. The VIF
+// records the subnets its addresses came from, which is what lets a released
+// or recovered port find its pool without another Neutron call.
+func subnetKeyOfVIF(v *kuryrv1.VIF) string {
+	ids := make([]string, 0, len(v.Network.Subnets))
+	for _, sub := range v.Network.Subnets {
+		if sub.ID != "" {
+			ids = append(ids, sub.ID)
+		}
+	}
+	return makeSubnetKey(ids)
 }
 
 // sgKey is a canonical form of a security group set.
@@ -627,7 +665,12 @@ func (p *Pool) keyFor(req drivers.PodVIFRequest) (key, error) {
 	if !ok {
 		return key{}, fmt.Errorf("pool: subnets for the pod span more than one network")
 	}
-	return key{Host: host, ProjectID: req.ProjectID, NetworkID: netID}, nil
+	return key{
+		Host:      host,
+		ProjectID: req.ProjectID,
+		NetworkID: netID,
+		Subnets:   subnetKeyOf(req.Subnets),
+	}, nil
 }
 
 func (p *Pool) keyForRelease(v *kuryrv1.VIF, req drivers.PodVIFRequest) (key, error) {
@@ -635,7 +678,12 @@ func (p *Pool) keyForRelease(v *kuryrv1.VIF, req drivers.PodVIFRequest) (key, er
 	if err != nil {
 		return key{}, err
 	}
-	return key{Host: host, ProjectID: req.ProjectID, NetworkID: v.Network.ID}, nil
+	return key{
+		Host:      host,
+		ProjectID: req.ProjectID,
+		NetworkID: v.Network.ID,
+		Subnets:   subnetKeyOfVIF(v),
+	}, nil
 }
 
 // Stats reports pool occupancy, for the status command and tests.
@@ -670,5 +718,10 @@ func (p *Pool) Populate(ctx context.Context, node *corev1.Node, req drivers.PodV
 	}
 
 	req.HostID = host
-	return p.populate(ctx, key{Host: host, ProjectID: req.ProjectID, NetworkID: netID}, req)
+	return p.populate(ctx, key{
+		Host:      host,
+		ProjectID: req.ProjectID,
+		NetworkID: netID,
+		Subnets:   subnetKeyOf(req.Subnets),
+	}, req)
 }

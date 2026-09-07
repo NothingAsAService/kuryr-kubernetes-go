@@ -29,6 +29,10 @@ data:
     # namespace gives every Kubernetes namespace its own Neutron subnet,
     # which is what lets a NetworkPolicy selecting a whole namespace become
     # one security group rule instead of one per pod.
+    #
+    # Set this to annotation instead to let a pod, or its namespace, name an
+    # existing subnet with openstack.org/kuryr-subnet-id; see
+    # [annotation_subnet] below.
     pod_subnets_driver = namespace
     service_subnets_driver = default
 
@@ -70,6 +74,16 @@ data:
     # REQUIRED by pod_subnets_driver = namespace.
     pod_router = <router-uuid>
     pod_subnet_pool = <subnet-pool-uuid>
+
+    # Only read when pod_subnets_driver = annotation, above.
+    # [annotation_subnet]
+    # Which driver serves pods carrying no openstack.org/kuryr-subnet-id
+    # annotation. It cannot be annotation itself.
+    # fallback_driver = namespace
+    # Refuse a subnet owned by another project, so a pod annotation is not a
+    # way onto another tenant's network. Pair it with
+    # pod_project_driver = annotation so each namespace names its tenant.
+    # enforce_project = true
 
     [pod_vif_nested]
     # The subnets the Kubernetes nodes live on. NetworkPolicy security groups
