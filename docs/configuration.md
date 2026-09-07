@@ -305,9 +305,11 @@ Flags are not in the file. Where both exist, the flag wins.
 | Name | On | Effect |
 | --- | --- | --- |
 | `openstack.org/kuryr-project` | Namespace | Pins everything in it to an OpenStack project. Read by the `annotation` project driver |
+| `openstack.org/kuryr-subnet-id` | Pod, Namespace | The existing Neutron subnet the pod's ports are created in. Read by the `annotation` subnet driver; see [Per-pod subnets](#per-pod-subnets) |
 | `openstack.org/kuryr-timeout-client-data` | Service | Overrides `timeout_client_data` for that Service's listeners |
 | `openstack.org/kuryr-timeout-member-data` | Service | Overrides `timeout_member_data` |
 | `k8s.v1.cni.cncf.io/networks` | Pod | Extra interfaces, read by the `npwg` multi-VIF driver |
+| `openstack.org/kuryr-config` | NetworkAttachmentDefinition | `{"subnetId": ..., "driverType": ...}` for an extra interface. Parsed strictly: an unrecognised or misspelled key is an error, because an empty `subnetId` would otherwise fall back to the cluster default subnet |
 | `pod_vif` | Node | Which pod VIF driver this node uses, for clusters mixing bare metal and nested nodes |
 | `kuryr.openstack.org/nodeName` | KuryrPort | Set by the controller. Lets each node's daemon watch only its own pods |
 

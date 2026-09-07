@@ -2,7 +2,7 @@ package drivers
 
 import (
 	"context"
-	"encoding/json"
+	json "encoding/json/v2"
 	"fmt"
 	"maps"
 	"slices"
@@ -193,10 +193,15 @@ func (n *npwgMultiVIF) readConfig(ctx context.Context, namespace, name string) (
 				"which subnet or driver to use for it", key, KuryrConfigAnnotation)
 	}
 
+	// This annotation is Kuryr's own format, so an unrecognised member is a
+	// mistake rather than something to skip past. Rejecting it matters most
+	// for subnetId: a misspelled key would otherwise leave the field empty
+	// and quietly fall back to the cluster default subnet, which on a
+	// multi-tenant cluster is another tenant's.
 	var conf nadConfig
-	if err := json.Unmarshal([]byte(raw), &conf); err != nil {
+	if err := json.Unmarshal([]byte(raw), &conf, json.RejectUnknownMembers(true)); err != nil {
 		return nadConfig{}, fmt.Errorf("the %s annotation of NetworkAttachmentDefinition %s "+
-			"is not valid JSON: %w", KuryrConfigAnnotation, key, err)
+			"is not valid: %w", KuryrConfigAnnotation, key, err)
 	}
 	return conf, nil
 }
@@ -239,6 +244,11 @@ func parseNetworks(annotation string) ([]networkRef, error) {
 	}
 
 	if strings.HasPrefix(annotation, "[") {
+		// Unknown members are left ignored here, unlike in readConfig: this
+		// annotation belongs to the Network Plumbing Working Group, whose
+		// entries carry fields Kuryr does not model (ips, mac, default-route
+		// among them). Rejecting those would refuse manifests that are valid
+		// for every other CNI reading the same annotation.
 		var refs []networkRef
 		if err := json.Unmarshal([]byte(annotation), &refs); err != nil {
 			return nil, fmt.Errorf("the %s annotation is not a valid network list: %w",

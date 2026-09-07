@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -356,5 +357,58 @@ func TestNPWGAcceptsTheUpstreamDriverName(t *testing.T) {
 		if got := drvs[0].Name(); got != "npwg" {
 			t.Errorf("%q built driver %q, want npwg", name, got)
 		}
+	}
+}
+
+// The networks annotation belongs to the Network Plumbing Working Group, and
+// its entries carry fields Kuryr does not model. Refusing those would refuse
+// manifests that are valid for every other CNI reading the same annotation.
+func TestParseNetworksIgnoresFieldsKuryrDoesNotModel(t *testing.T) {
+	got, err := parseNetworks(
+		`[{"name":"net-a","mac":"02:00:00:00:00:01","ips":["10.0.0.9"],"default-route":["10.0.0.1"]}]`)
+	if err != nil {
+		t.Fatalf("parseNetworks: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "net-a" {
+		t.Fatalf("got %+v, want the single entry net-a", got)
+	}
+}
+
+func TestParseNetworksRejectsDuplicateKeys(t *testing.T) {
+	// Which of the two a parser picks is not defined, so two CNIs reading the
+	// same annotation can disagree about which network a pod asked for.
+	_, err := parseNetworks(`[{"name":"net-a","name":"net-b"}]`)
+	if err == nil {
+		t.Error("expected an error for an entry with a duplicated name key")
+	}
+}
+
+func TestReadConfigRejectsAMisspelledKey(t *testing.T) {
+	// A key that is not recognised leaves SubnetID empty, and an empty
+	// SubnetID falls back to the cluster default subnet. On a multi-tenant
+	// cluster that default belongs to somebody else, so the typo has to be an
+	// error rather than a silent redirection.
+	n := newNPWG(t, &recordingVIFDriver{name: "neutron-vif"},
+		nad("default", "net-a", `{"subnetid":"subnet-extra"}`))
+
+	_, err := n.readConfig(context.Background(), "default", "net-a")
+	if err == nil {
+		t.Fatal("expected an error for a misspelled subnetId key")
+	}
+	if !strings.Contains(err.Error(), KuryrConfigAnnotation) {
+		t.Errorf("error %q does not name the annotation at fault", err)
+	}
+}
+
+func TestReadConfigAcceptsTheDocumentedSpelling(t *testing.T) {
+	n := newNPWG(t, &recordingVIFDriver{name: "neutron-vif"},
+		nad("default", "net-a", `{"subnetId":"subnet-extra","driverType":"nested-vlan"}`))
+
+	conf, err := n.readConfig(context.Background(), "default", "net-a")
+	if err != nil {
+		t.Fatalf("readConfig: %v", err)
+	}
+	if conf.SubnetID != "subnet-extra" || conf.DriverType != "nested-vlan" {
+		t.Errorf("conf = %+v, want subnet-extra on nested-vlan", conf)
 	}
 }
