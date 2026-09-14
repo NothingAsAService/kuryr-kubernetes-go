@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -392,4 +393,72 @@ func TestConcurrentMutationIsRaceFree(t *testing.T) {
 		_, _ = r.WaitForActive(ctx, testKey)
 	}()
 	wg.Wait()
+}
+
+// A node runs, and deletes, an unbounded number of pods over the life of the
+// daemon, and every one of them reaches MarkPodGone -- once when it starts
+// terminating and once when it leaves the API. Recording each permanently
+// would make the daemon's memory grow with the node's lifetime churn rather
+// than with the pods currently on it.
+func TestDeletedPodsDoNotAccumulate(t *testing.T) {
+	r := New()
+
+	// Yesterday's churn, as the daemon would have recorded it.
+	stale := time.Now().Add(-24 * time.Hour)
+	r.mu.Lock()
+	for i := range 10 * goneSweepThreshold {
+		r.gone[fmt.Sprintf("default/finished-%d", i)] = stale
+	}
+	r.mu.Unlock()
+
+	// One more deletion now. Nothing else sweeps, so if this does not, the
+	// markers are kept for the life of the process.
+	r.MarkPodGone("default/finished-now")
+
+	if n := r.Len(); n != 0 {
+		t.Errorf("registry tracks %d pods after only deletions, want 0", n)
+	}
+
+	r.mu.RLock()
+	markers := len(r.gone)
+	r.mu.RUnlock()
+	// Only the recent one survives: the bound is what the node deleted inside
+	// one TTL, not what it has deleted since the daemon started.
+	if markers != 1 {
+		t.Errorf("registry holds %d deletion markers, want 1 (the only recent one)", markers)
+	}
+}
+
+// The marker still has to do its job: an ADD that arrives after the pod is
+// already gone must fail at once rather than wait out its timeout.
+func TestWaitFailsFastForAPodDeletedBeforeTheCall(t *testing.T) {
+	r := New()
+	r.MarkPodGone(testKey)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := r.WaitForVIFs(ctx, testKey, "uid-1")
+	if !errors.Is(err, ErrPodGone) {
+		t.Fatalf("err = %v, want ErrPodGone", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("waited %s before giving up; the marker should make this immediate", elapsed)
+	}
+}
+
+// A pod recreated under the same name must not inherit its predecessor's
+// deletion marker, or its own CNI ADD would be told the pod is gone.
+func TestMarkerIsClearedWhenPortsArriveAgain(t *testing.T) {
+	r := New()
+	r.MarkPodGone(testKey)
+	r.Upsert(testKey, kuryrPort("uid-2", true))
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if _, err := r.WaitForVIFs(ctx, testKey, "uid-2"); err != nil {
+		t.Fatalf("WaitForVIFs after the pod came back: %v", err)
+	}
 }

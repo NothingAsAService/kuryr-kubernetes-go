@@ -69,7 +69,7 @@ func newTestServer(t *testing.T) (*Server, *registry.Registry, *fakeBinder) {
 
 	reg := registry.New()
 	binder := &fakeBinder{}
-	srv := New(cfg, reg, logr.Discard(), NewMetrics(prometheus.NewRegistry()))
+	srv := New(cfg, reg, logr.Discard(), NewMetrics(prometheus.NewRegistry(), reg))
 	srv.binder = binder
 	srv.delWait = 100 * time.Millisecond
 
