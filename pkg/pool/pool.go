@@ -117,13 +117,25 @@ func (b *bucket) push(sg sgKey, portID string) {
 	b.touch(sg)
 }
 
-// pop takes a port, preferring an exact security group match. The second
-// return value reports whether the port needs its groups rewritten.
-func (b *bucket) pop(want sgKey) (string, bool, bool) {
+// popped is a port taken out of a bucket, and what the caller has to know to
+// either use it or put it back.
+type popped struct {
+	portID string
+	// held is the group set the port actually carries right now. It is what
+	// the port has to be filed under again if it goes back, which is not
+	// necessarily the set that was asked for.
+	held sgKey
+	// needsSGUpdate reports that held differs from the requested set, so the
+	// port's groups have to be rewritten before a pod may use it.
+	needsSGUpdate bool
+}
+
+// pop takes a port, preferring an exact security group match.
+func (b *bucket) pop(want sgKey) (popped, bool) {
 	if ports := b.groups[want]; len(ports) > 0 {
 		portID := ports[len(ports)-1]
 		b.groups[want] = ports[:len(ports)-1]
-		return portID, false, true
+		return popped{portID: portID, held: want}, true
 	}
 
 	for _, sg := range b.order {
@@ -133,9 +145,9 @@ func (b *bucket) pop(want sgKey) (string, bool, bool) {
 		}
 		portID := ports[len(ports)-1]
 		b.groups[sg] = ports[:len(ports)-1]
-		return portID, true, true
+		return popped{portID: portID, held: sg, needsSGUpdate: true}, true
 	}
-	return "", false, false
+	return popped{}, false
 }
 
 // remove drops a specific port, used when it turns out to be unusable.
@@ -248,11 +260,12 @@ func (p *Pool) take(ctx context.Context, k key, want sgKey, req drivers.PodVIFRe
 		p.mu.Unlock()
 		return nil, nil
 	}
-	portID, needsSGUpdate, found := b.pop(want)
+	taken, found := b.pop(want)
 	if !found {
 		p.mu.Unlock()
 		return nil, nil
 	}
+	portID := taken.portID
 	v, known := p.vifs[portID]
 	p.mu.Unlock()
 
@@ -263,11 +276,15 @@ func (p *Pool) take(ctx context.Context, k key, want sgKey, req drivers.PodVIFRe
 		return nil, nil
 	}
 
-	if needsSGUpdate {
+	if taken.needsSGUpdate {
 		if err := p.inner.UpdateVIFSecurityGroups(ctx, v, req.SecurityGroups); err != nil {
-			// Put it back: the port is still good, just not for this pod.
+			// Put it back under the groups it still carries, not under the
+			// ones this pod wanted. Filing it under the requested set would
+			// make the next pod asking for that set take it as an exact
+			// match and skip the update, giving it a port on somebody else's
+			// security groups.
 			p.mu.Lock()
-			p.bucketFor(k).push(makeSGKey(nil), portID)
+			p.bucketFor(k).push(taken.held, portID)
 			p.mu.Unlock()
 			return nil, fmt.Errorf("re-applying security groups to pooled port %s: %w", portID, err)
 		}

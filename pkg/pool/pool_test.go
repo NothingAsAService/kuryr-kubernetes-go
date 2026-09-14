@@ -725,12 +725,15 @@ func TestBucketPrefersExactSecurityGroupMatch(t *testing.T) {
 	b.push("sg-a", "port-a")
 	b.push("sg-b", "port-b")
 
-	id, needsUpdate, ok := b.pop("sg-b")
-	if !ok || id != "port-b" {
-		t.Fatalf("pop returned %q, %v; want port-b", id, ok)
+	taken, ok := b.pop("sg-b")
+	if !ok || taken.portID != "port-b" {
+		t.Fatalf("pop returned %q, %v; want port-b", taken.portID, ok)
 	}
-	if needsUpdate {
+	if taken.needsSGUpdate {
 		t.Error("an exact match must not require a security group rewrite")
+	}
+	if taken.held != "sg-b" {
+		t.Errorf("pop reported the port holds %q, want sg-b", taken.held)
 	}
 }
 
@@ -740,15 +743,21 @@ func TestBucketBorrowsFromOldestGroup(t *testing.T) {
 	b.push("sg-new", "port-new")
 
 	// sg-old was touched first, so it is at the front and gets raided first.
-	id, needsUpdate, ok := b.pop("sg-absent")
+	taken, ok := b.pop("sg-absent")
 	if !ok {
 		t.Fatal("expected a port to be borrowed")
 	}
-	if id != "port-old" {
-		t.Errorf("borrowed %q, want port-old (the least recently refreshed group)", id)
+	if taken.portID != "port-old" {
+		t.Errorf("borrowed %q, want port-old (the least recently refreshed group)", taken.portID)
 	}
-	if !needsUpdate {
+	if !taken.needsSGUpdate {
 		t.Error("a borrowed port must be flagged for a security group rewrite")
+	}
+	// The groups the port still carries are what it has to go back under if
+	// the rewrite fails, so pop has to report them rather than the ones the
+	// caller asked for.
+	if taken.held != "sg-old" {
+		t.Errorf("pop reported the port holds %q, want sg-old", taken.held)
 	}
 }
 
