@@ -3,7 +3,7 @@ module opendev.org/openstack/kuryr-kubernetes
 go 1.27.0
 
 require (
-	github.com/containernetworking/cni v1.3.0
+	github.com/containernetworking/cni v1.3.1
 	github.com/containernetworking/plugins v1.9.1
 	github.com/go-logr/logr v1.4.4
 	github.com/gophercloud/gophercloud/v2 v2.14.0
@@ -13,7 +13,7 @@ require (
 	k8s.io/api v0.37.0
 	k8s.io/apimachinery v0.37.0
 	k8s.io/client-go v0.37.0
-	sigs.k8s.io/controller-runtime v0.24.1
+	sigs.k8s.io/controller-runtime v0.25.1
 	sigs.k8s.io/yaml v1.6.0
 )
 

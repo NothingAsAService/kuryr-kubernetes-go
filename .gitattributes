@@ -1,0 +1,15 @@
+# Go tooling compares files byte for byte: gofmt reports a CRLF file as
+# unformatted, so on Windows -- where git defaults to core.autocrlf=true --
+# `make lint` fails on files nobody has touched, and the only way to pass is
+# to rewrite every file in the repository.
+#
+# Pinning the working-tree form settles it. Everything here is read by Linux
+# tools in the end: the CNI plugin ships as a Linux binary, the shell scripts
+# run in a container, and a CRLF in cni_ds_init would make its shebang fail
+# with a message that does not mention line endings.
+* text=auto eol=lf
+
+# Binary, so never translated and never diffed as text.
+*.png binary
+*.jpg binary
+*.gz  binary
