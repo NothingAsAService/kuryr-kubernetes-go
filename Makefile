@@ -95,14 +95,49 @@ lint: golangci-lint ## Run golangci-lint.
 lint-fix: golangci-lint ## Run golangci-lint and apply what it can fix itself.
 	$(GOLANGCI_LINT) run --fix
 
+.PHONY: check
+check: test lint ## Everything CI runs: generate, vet, test and lint.
+
+# A generated file that is out of date with its source is a silent
+# divergence: the cluster gets the CRD from config/crd, not from the markers,
+# so a schema change that was never regenerated is only noticed when an object
+# is rejected. This is the target to run in CI, after `make manifests
+# generate`.
+.PHONY: verify-generated
+verify-generated: manifests generate ## Fail if the generated files are not committed.
+	@if ! git diff --quiet -- config/crd api/v1/zz_generated.deepcopy.go config/rbac; then \
+		echo "generated files are out of date; run 'make manifests generate' and commit the result:"; \
+		git --no-pager diff --stat -- config/crd api/v1/zz_generated.deepcopy.go config/rbac; \
+		exit 1; \
+	fi
+
 ##@ Build
 
+BINARIES = kuryr-controller kuryr-daemon kuryr-cni kuryr-status
+
 .PHONY: build
-build: manifests generate fmt vet ## Build all four binaries into bin/.
-	go build -o bin/kuryr-controller ./cmd/kuryr-controller
-	go build -o bin/kuryr-daemon ./cmd/kuryr-daemon
-	go build -o bin/kuryr-cni ./cmd/kuryr-cni
-	go build -o bin/kuryr-status ./cmd/kuryr-status
+build: manifests generate fmt vet ## Build all four binaries into bin/, for this machine.
+	@for binary in $(BINARIES); do \
+		echo "building bin/$$binary"; \
+		go build -o bin/$$binary ./cmd/$$binary || exit 1; \
+	done
+
+# The shipped binaries are Linux binaries: kuryr-daemon and kuryr-cni drive
+# netlink and network namespaces, and on any other platform they compile
+# against stubs that refuse every call. `build` above still builds for the
+# host, which is what `go run` and a debugger need; this is what you copy to a
+# node.
+TARGETARCH ?= amd64
+DIST_DIR = bin/linux_$(TARGETARCH)
+
+.PHONY: build-linux
+build-linux: manifests generate ## Cross-compile all four binaries for linux into bin/linux_<arch>/.
+	@mkdir -p $(DIST_DIR)
+	@for binary in $(BINARIES); do \
+		echo "building $(DIST_DIR)/$$binary"; \
+		CGO_ENABLED=0 GOOS=linux GOARCH=$(TARGETARCH) \
+			go build -trimpath -ldflags="-s -w" -o $(DIST_DIR)/$$binary ./cmd/$$binary || exit 1; \
+	done
 
 KURYR_CONF ?= etc/kuryr.conf
 
@@ -119,6 +154,14 @@ docker-build: ## Build both container images.
 docker-push: ## Push both container images.
 	$(CONTAINER_TOOL) push $(CONTROLLER_IMG)
 	$(CONTAINER_TOOL) push $(CNI_IMG)
+
+# Kind reads images from its own containerd, not from the host daemon, so an
+# image built locally is invisible to it until it is loaded. This is what
+# makes a build-deploy-test round trip possible without a registry at all.
+.PHONY: kind-load
+kind-load: kind ## Load both locally built images into the kind cluster.
+	$(KIND) load docker-image $(CONTROLLER_IMG) --name kuryr-e2e
+	$(KIND) load docker-image $(CNI_IMG) --name kuryr-e2e
 
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Render the whole deployment into dist/install.yaml.
@@ -147,7 +190,11 @@ helm: manifests generate kustomize helmify ## Render the whole deployment as a H
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(CONTROLLER_IMG)
 	cd config/cni && $(KUSTOMIZE) edit set image cni=$(CNI_IMG)
 	$(KUSTOMIZE) build config/default | $(HELMIFY) $(HELM_CHART_DIR)
-	./hack/helm-split-serviceaccounts.sh $(HELM_CHART_DIR)
+	# Run through bash rather than relying on the shebang. Resolving a
+	# shebang from a recipe goes through the Windows working directory, which
+	# a space in the path then splits -- and this step is the one that must
+	# not be skipped, so it must not be the one that silently cannot run.
+	bash ./hack/helm-split-serviceaccounts.sh $(HELM_CHART_DIR)
 
 ##@ Deployment
 
@@ -175,19 +222,39 @@ undeploy: kustomize ## Remove them again.
 
 ##@ Dependencies
 
-# Tool binaries land here. GNU make cannot express a target whose name
-# contains a space, so a checkout under such a path breaks every tool target.
-# Override it in that case: make test LOCALBIN=/tmp/kuryr-bin
+# Tool binaries land here.
+#
+# GNU make cannot express a target whose name contains a space, so a checkout
+# under such a path -- "C:/Users/me/My Documents/kuryr-go", a synced OneDrive
+# or Dropbox folder -- would break every tool target with a stream of
+# "overriding recipe" warnings and no working tools. Rather than leave that as
+# a trap with a note beside it, fall back to a path that has no space.
+empty :=
+space := $(empty) $(empty)
 LOCALBIN ?= $(shell pwd)/bin
+ifneq (,$(findstring $(space),$(LOCALBIN)))
+# `go env GOPATH` answers in the native path syntax, which on Windows means
+# backslashes -- and the recipe shell is sh, which would eat them. Normalise
+# before using it anywhere.
+LOCALBIN := $(subst \,/,$(shell go env GOPATH))/bin/kuryr-tools
+$(info this checkout is under a path containing a space, so tools go to $(LOCALBIN) instead of ./bin)
+endif
+
 $(LOCALBIN):
 	mkdir -p $(LOCALBIN)
 
-KUSTOMIZE ?= $(LOCALBIN)/kustomize
-CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
-ENVTEST ?= $(LOCALBIN)/setup-envtest
-GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
-HELMIFY ?= $(LOCALBIN)/helmify
-KIND ?= $(LOCALBIN)/kind
+# Go appends .exe on Windows. Without this every tool target reinstalls on
+# every run, because the file it looks for is never the one go install wrote.
+ifeq ($(shell go env GOOS),windows)
+EXE := .exe
+endif
+
+KUSTOMIZE ?= $(LOCALBIN)/kustomize$(EXE)
+CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen$(EXE)
+ENVTEST ?= $(LOCALBIN)/setup-envtest$(EXE)
+GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint$(EXE)
+HELMIFY ?= $(LOCALBIN)/helmify$(EXE)
+KIND ?= $(LOCALBIN)/kind$(EXE)
 
 # Pinned, so a build is reproducible and an upgrade is a reviewable diff
 # rather than something that happens on its own the next time CI runs.
@@ -201,45 +268,46 @@ KIND_VERSION ?= v0.33.0
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE)
 $(KUSTOMIZE): $(LOCALBIN)
-	$(call go-install-tool,$(KUSTOMIZE),sigs.k8s.io/kustomize/kustomize/v5,$(KUSTOMIZE_VERSION))
+	$(call go-install-tool,kustomize,sigs.k8s.io/kustomize/kustomize/v5,$(KUSTOMIZE_VERSION))
 
 .PHONY: controller-gen
 controller-gen: $(CONTROLLER_GEN)
 $(CONTROLLER_GEN): $(LOCALBIN)
-	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
+	$(call go-install-tool,controller-gen,sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
 
 .PHONY: setup-envtest
 setup-envtest: $(ENVTEST)
 $(ENVTEST): $(LOCALBIN)
-	$(call go-install-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest,$(ENVTEST_VERSION))
+	$(call go-install-tool,setup-envtest,sigs.k8s.io/controller-runtime/tools/setup-envtest,$(ENVTEST_VERSION))
 
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT)
 $(GOLANGCI_LINT): $(LOCALBIN)
-	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+	$(call go-install-tool,golangci-lint,github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 
 .PHONY: kind
 kind: $(KIND)
 $(KIND): $(LOCALBIN)
-	$(call go-install-tool,$(KIND),sigs.k8s.io/kind,$(KIND_VERSION))
+	$(call go-install-tool,kind,sigs.k8s.io/kind,$(KIND_VERSION))
 
 .PHONY: helmify
 helmify: $(HELMIFY)
 $(HELMIFY): $(LOCALBIN)
-	$(call go-install-tool,$(HELMIFY),github.com/arttor/helmify/cmd/helmify,$(HELMIFY_VERSION))
+	$(call go-install-tool,helmify,github.com/arttor/helmify/cmd/helmify,$(HELMIFY_VERSION))
 
 # go-install-tool installs a tool at a pinned version into $(LOCALBIN),
 # keeping the version in the filename so switching branches reinstalls rather
-# than silently reusing the wrong binary.
-# $1 - target path, $2 - package url, $3 - version
+# than silently reusing the wrong binary. The unversioned name is a copy, not
+# a symlink: Windows does not give an ordinary user the right to create one.
+#
+# $1 - tool name, $2 - package url, $3 - version
 define go-install-tool
-@[ -f "$(1)-$(3)" ] || { \
-set -e; \
-package=$(2)@$(3) ;\
-echo "Downloading $${package}" ;\
-rm -f $(1) || true ;\
-GOBIN=$(LOCALBIN) go install $${package} ;\
-mv $(1) $(1)-$(3) ;\
+@[ -f "$(LOCALBIN)/$(1)-$(3)$(EXE)" ] || { \
+set -e ;\
+echo "Downloading $(2)@$(3)" ;\
+rm -f "$(LOCALBIN)/$(1)$(EXE)" ;\
+GOBIN="$(LOCALBIN)" go install $(2)@$(3) ;\
+mv "$(LOCALBIN)/$(1)$(EXE)" "$(LOCALBIN)/$(1)-$(3)$(EXE)" ;\
 } ;\
-ln -sf $(1)-$(3) $(1)
+cp -f "$(LOCALBIN)/$(1)-$(3)$(EXE)" "$(LOCALBIN)/$(1)$(EXE)"
 endef
