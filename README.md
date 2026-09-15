@@ -16,11 +16,18 @@ place of several under `cotyledon`.
 
 ## Documentation
 
+Reference documentation is in English. The three documents aimed at someone
+new to OpenStack are in Vietnamese, because that is who they are written for;
+they carry an English-Vietnamese glossary.
+
 | Document | What is in it |
 | --- | --- |
 | [docs/architecture.md](docs/architecture.md) | How it works: the components, the CRDs, and what happens when a pod starts, a policy changes or a Service is created |
 | [docs/configuration.md](docs/configuration.md) | Every `kuryr.conf` section and key, what it does, and which combinations are rejected at startup |
 | [etc/kuryr.conf](etc/kuryr.conf) | Annotated sample configuration to copy and edit |
+| [docs/openstack-primer.vi.md](docs/openstack-primer.vi.md) | 🇻🇳 Every OpenStack concept Kuryr touches, for someone who has never used OpenStack, and how Kubernetes maps onto it |
+| [docs/installation.vi.md](docs/installation.vi.md) | 🇻🇳 Installing from nothing: the OpenStack resources to create, the configuration, the deployment, verification and troubleshooting |
+| [docs/makefile.vi.md](docs/makefile.vi.md) | 🇻🇳 Every Makefile target and the development workflow |
 
 ## What gets deployed
 
@@ -28,7 +35,7 @@ Four binaries, from two container images:
 
 | Binary | Runs as | Job |
 | --- | --- | --- |
-| `kuryr-controller` | a Deployment, 2 replicas, one active | Watches Kubernetes, creates and deletes Neutron and Octavia resources |
+| `kuryr-controller` | a Deployment, 1 replica by default; scale up for active/passive HA | Watches Kubernetes, creates and deletes Neutron and Octavia resources |
 | `kuryr-daemon` | a DaemonSet, one per node | Plugs interfaces into pod network namespaces |
 | `kuryr-cni` | a binary the daemon installs on the host | The CNI plugin the container runtime calls; forwards to `kuryr-daemon` over localhost |
 | `kuryr-status` | a one-shot command | Pre-flight checks: the configuration, the CRDs, and the cloud endpoints and extensions the configured drivers need |
@@ -143,9 +150,16 @@ kubectl describe kuryrport -n <namespace> <pod-name>
 ```sh
 make test        # unit tests, after regenerating manifests and deepcopy
 make lint        # golangci-lint, the standing quality gate
-make build       # all three binaries into bin/
+make check       # both of the above, which is what CI runs
+make build       # all four binaries into bin/, for this machine
+make build-linux # all four cross-compiled for a node, into bin/linux_amd64/
 make run         # the controller against ~/.kube/config, using etc/kuryr.conf
 ```
+
+`make help` lists every target. Tools (controller-gen, kustomize, kind and the
+rest) are downloaded at pinned versions on first use; they land in `bin/`,
+or in `$GOPATH/bin/kuryr-tools` when the checkout sits under a path containing
+a space, because make cannot name a target with a space in it.
 
 ### End-to-end tests
 
@@ -177,7 +191,7 @@ GOOS=linux golangci-lint run
 
 ```
 api/v1/              The four CRDs and the VIF types they carry
-cmd/                 The three binaries
+cmd/                 The four binaries
 internal/controller/ One reconciler per watched kind
 pkg/cni/binding/     Node-side interface plugging (Linux only)
 pkg/cni/registry/    The daemon's view of the pods on its node
