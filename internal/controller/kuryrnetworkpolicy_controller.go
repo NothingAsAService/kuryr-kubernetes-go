@@ -269,6 +269,10 @@ func (r *KuryrNetworkPolicyReconciler) syncRules(ctx context.Context, knp *kuryr
 		}
 		if err := r.OpenStack.DeleteSGRule(ctx, existing.ID); err != nil {
 			if !openstack.IsNotFound(err) {
+				// The rule is still in Neutron, so it has to stay in the
+				// status: dropping it here would leave a rule nothing knows
+				// about, still enforcing something the policy no longer says.
+				next = append(next, existing)
 				if saveErr := r.saveRules(ctx, knp, next); saveErr != nil {
 					return fmt.Errorf("%w (and recording the surviving rules failed: %w)", err, saveErr)
 				}

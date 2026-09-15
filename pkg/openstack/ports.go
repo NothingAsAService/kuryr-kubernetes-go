@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/gophercloud/gophercloud/v2"
@@ -41,10 +42,26 @@ const (
 // retryable by itself; something in the Neutron deployment is wrong.
 var ErrBindingFailed = errors.New("neutron reported binding_failed for the port")
 
+// ErrRevisionConflict means Neutron rejected an update because the port had
+// changed since it was read. The caller re-reads and tries again; it is the
+// expected outcome when several pods on one node update the same parent port
+// at the same time.
+var ErrRevisionConflict = errors.New("the port was modified concurrently")
+
 // FixedIP is one address allocation on a port.
 type FixedIP struct {
 	SubnetID  string `json:"subnet_id,omitempty"`
 	IPAddress string `json:"ip_address,omitempty"`
+}
+
+// AddressPair is one entry of a port's allowed_address_pairs.
+//
+// Neutron drops any packet whose source address is not one the port owns.
+// A macvlan child inside a pod sends from its own address over the node VM's
+// port, so without an entry here every packet it sends is discarded.
+type AddressPair struct {
+	IPAddress  string `json:"ip_address"`
+	MACAddress string `json:"mac_address,omitempty"`
 }
 
 // PortSpec is a request to create a port.
@@ -75,6 +92,13 @@ type Port struct {
 	FixedIPs       []FixedIP
 	SecurityGroups []string
 	Tags           []string
+
+	// AllowedAddressPairs are the addresses this port may also send from.
+	AllowedAddressPairs []AddressPair
+	// RevisionNumber is Neutron's optimistic concurrency token. An update
+	// that carries it is rejected if anything else changed the port first,
+	// which is what makes read-modify-write on a shared port safe.
+	RevisionNumber int
 
 	VIFType    string
 	VIFDetails map[string]any
@@ -123,11 +147,16 @@ func (p *portWithBinding) toPort() *Port {
 		HostID:         p.HostID,
 		SecurityGroups: p.SecurityGroups,
 		Tags:           p.Tags,
+		RevisionNumber: p.RevisionNumber,
 		VIFType:        p.VIFType,
 		VIFDetails:     p.VIFDetails,
 	}
 	for _, ip := range p.FixedIPs {
 		out.FixedIPs = append(out.FixedIPs, FixedIP{SubnetID: ip.SubnetID, IPAddress: ip.IPAddress})
+	}
+	for _, pair := range p.AllowedAddressPairs {
+		out.AllowedAddressPairs = append(out.AllowedAddressPairs,
+			AddressPair{IPAddress: pair.IPAddress, MACAddress: pair.MACAddress})
 	}
 	return out
 }
@@ -339,6 +368,14 @@ type PortUpdate struct {
 	DeviceOwner    *string
 	HostID         *string
 	SecurityGroups *[]string
+	// AllowedAddressPairs replaces the whole list. Neutron has no way to add
+	// or remove a single pair, so every change is a read-modify-write, which
+	// is why IfRevision exists.
+	AllowedAddressPairs *[]AddressPair
+	// IfRevision makes the update conditional on the port still being at that
+	// revision. Neutron answers 412 otherwise, which UpdatePort reports as
+	// ErrRevisionConflict.
+	IfRevision *int
 }
 
 // UpdatePort applies a partial update.
@@ -359,19 +396,103 @@ func (c *Client) UpdatePort(ctx context.Context, id string, u PortUpdate) (*Port
 	if u.SecurityGroups != nil {
 		body["security_groups"] = *u.SecurityGroups
 	}
+	if u.AllowedAddressPairs != nil {
+		// Encode an empty list as [], not null: null leaves the pairs alone
+		// while [] clears them, and clearing is what removing the last pair
+		// has to do.
+		pairs := *u.AllowedAddressPairs
+		if pairs == nil {
+			pairs = []AddressPair{}
+		}
+		body["allowed_address_pairs"] = pairs
+	}
 	if len(body) == 0 {
 		return c.GetPort(ctx, id)
+	}
+
+	opts := &gophercloud.RequestOpts{OkCodes: []int{200}}
+	if u.IfRevision != nil {
+		opts.MoreHeaders = map[string]string{
+			"If-Match": fmt.Sprintf("revision_number=%d", *u.IfRevision),
+		}
 	}
 
 	var resp struct {
 		Port portWithBinding `json:"port"`
 	}
 	if _, err := c.Network.Put(ctx, c.Network.ServiceURL("ports", id),
-		map[string]any{"port": body}, &resp,
-		&gophercloud.RequestOpts{OkCodes: []int{200}}); err != nil {
+		map[string]any{"port": body}, &resp, opts); err != nil {
+		if IsRevisionConflict(err) {
+			return nil, fmt.Errorf("updating port %s: %w", id, ErrRevisionConflict)
+		}
 		return nil, fmt.Errorf("updating port %s: %w", id, err)
 	}
 	return resp.Port.toPort(), nil
+}
+
+// addressPairRetries bounds how many times a read-modify-write on a shared
+// port is retried. Every pod starting on one node updates the same parent
+// port, so losing the race is routine; losing it this many times in a row is
+// not, and means something else is rewriting the port continuously.
+const addressPairRetries = 5
+
+// UpdateAllowedAddressPairs re-reads a port, applies change to its address
+// pairs, and writes the result back only if nothing else touched the port in
+// between.
+//
+// It exists because Neutron replaces the whole list on update. Two pods
+// starting on one node would otherwise each read the list, add their own
+// address, and write back — and the second write would silently drop the
+// first pod's entry, cutting its traffic off with nothing in any log to say
+// why.
+func (c *Client) UpdateAllowedAddressPairs(ctx context.Context, portID string,
+	change func([]AddressPair) []AddressPair) error {
+
+	var lastErr error
+	for range addressPairRetries {
+		port, err := c.GetPort(ctx, portID)
+		if err != nil {
+			return err
+		}
+
+		updated := change(append([]AddressPair(nil), port.AllowedAddressPairs...))
+		if equalAddressPairs(port.AllowedAddressPairs, updated) {
+			return nil
+		}
+
+		_, err = c.UpdatePort(ctx, portID, PortUpdate{
+			AllowedAddressPairs: &updated,
+			IfRevision:          &port.RevisionNumber,
+		})
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, ErrRevisionConflict) {
+			return err
+		}
+		lastErr = err
+	}
+	return fmt.Errorf("updating the allowed address pairs of port %s: %w", portID, lastErr)
+}
+
+// equalAddressPairs reports whether two pair lists are the same, so an update
+// that would change nothing is skipped rather than sent.
+func equalAddressPairs(a, b []AddressPair) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// IsRevisionConflict reports whether Neutron rejected a conditional update
+// because the resource had moved on.
+func IsRevisionConflict(err error) bool {
+	return gophercloud.ResponseCodeIs(err, 412)
 }
 
 // DeletePort removes a port. A port that is already gone is not an error;
@@ -425,16 +546,7 @@ func (c *Client) TagPort(ctx context.Context, id string, tags []string) error {
 	return nil
 }
 
-func joinTags(tags []string) string {
-	out := ""
-	for i, t := range tags {
-		if i > 0 {
-			out += ","
-		}
-		out += t
-	}
-	return out
-}
+func joinTags(tags []string) string { return strings.Join(tags, ",") }
 
 // IsNotFound reports whether an OpenStack error is a 404.
 func IsNotFound(err error) bool {
@@ -460,34 +572,10 @@ func IsOverQuota(err error) bool {
 	}
 	var e gophercloud.ErrUnexpectedResponseCode
 	if errors.As(err, &e) {
-		return containsFold(string(e.Body), "OverQuota") ||
-			containsFold(string(e.Body), "Quota exceeded")
-	}
-	return false
-}
-
-func containsFold(haystack, needle string) bool {
-	if len(needle) > len(haystack) {
-		return false
-	}
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		match := true
-		for j := 0; j < len(needle); j++ {
-			a, b := haystack[i+j], needle[j]
-			if a >= 'A' && a <= 'Z' {
-				a += 'a' - 'A'
-			}
-			if b >= 'A' && b <= 'Z' {
-				b += 'a' - 'A'
-			}
-			if a != b {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
+		// Neutron has no machine-readable marker for this, so the body is
+		// all there is to go on, and its wording differs by release.
+		body := strings.ToLower(string(e.Body))
+		return strings.Contains(body, "overquota") || strings.Contains(body, "quota exceeded")
 	}
 	return false
 }

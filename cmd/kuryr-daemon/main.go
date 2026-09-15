@@ -110,7 +110,7 @@ func run() error {
 	}
 
 	reg := registry.New()
-	metrics := server.NewMetrics(ctrlmetrics.Registry)
+	metrics := server.NewMetrics(ctrlmetrics.Registry, reg)
 	srv := server.New(cfg, reg, ctrl.Log.WithName("cni"), metrics)
 
 	if err := (&watcher.KuryrPortReconciler{Client: mgr.GetClient(), Registry: reg}).

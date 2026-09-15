@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 
@@ -108,6 +109,17 @@ type Registry struct {
 	mu      sync.RWMutex
 	entries map[string]*Entry
 
+	// gone records pods that vanished without ever having an entry, so an
+	// ADD that arrives after the deletion still fails immediately instead of
+	// waiting out its whole timeout.
+	//
+	// It is separate from entries, and expiring, because every pod ever
+	// deleted on the node passes through here -- once when it starts
+	// terminating and once when it leaves the API -- so a permanent marker
+	// per pod would grow without bound for the life of the daemon. A marker
+	// only has to outlive the CNI call that might be racing the deletion.
+	gone map[string]time.Time
+
 	// changed is closed and replaced on every mutation. A waiter takes a
 	// reference to it before checking its predicate, so it cannot miss an
 	// update that lands between the check and the wait.
@@ -118,10 +130,25 @@ type Registry struct {
 	keyed keyedMutex
 }
 
+// goneTTL is how long a "this pod is never getting ports" marker is kept.
+//
+// It only has to outlive a CNI call that started before the deletion was
+// seen, which [cni_daemon]vif_annotation_timeout already bounds. Minutes of
+// headroom over that costs a handful of map entries and covers a daemon that
+// was busy when the deletion arrived.
+const goneTTL = 5 * time.Minute
+
+// goneSweepThreshold is how many markers may accumulate before they are swept.
+// Sweeping is a walk of the map, so it is done in batches rather than on every
+// deletion; the threshold is well above the number of pods a node churns
+// within one TTL under normal conditions.
+const goneSweepThreshold = 128
+
 // New returns an empty registry.
 func New() *Registry {
 	return &Registry{
 		entries: map[string]*Entry{},
+		gone:    map[string]time.Time{},
 		changed: make(chan struct{}),
 	}
 }
@@ -151,6 +178,10 @@ func (r *Registry) Upsert(key string, kp *kuryrv1.KuryrPort) {
 	for ifname, pv := range kp.Status.VIFs {
 		vifs[ifname] = *pv.VIF.DeepCopy()
 	}
+
+	// A pod of this name has ports again, so any marker saying it vanished is
+	// about an earlier incarnation and must not fail this one's CNI ADD.
+	delete(r.gone, key)
 
 	existing, ok := r.entries[key]
 	if !ok || existing.PodUID != kp.Spec.PodUID || existing.podGone {
@@ -212,6 +243,10 @@ func (r *Registry) MarkUnplugged(key string) {
 // MarkPodGone records that a pod was deleted without ever getting a
 // KuryrPort. Without this a concurrent CNI ADD would wait out its whole
 // timeout for data that is never coming.
+//
+// For a pod with no entry at all the marker goes in the expiring gone map
+// rather than becoming an entry of its own: see the field comment for why a
+// permanent one would grow without bound.
 func (r *Registry) MarkPodGone(key string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -223,18 +258,32 @@ func (r *Registry) MarkPodGone(key string) {
 			return
 		}
 		e.podGone = true
-	} else {
-		r.entries[key] = &Entry{podGone: true}
+		r.notify()
+		return
 	}
+
+	if len(r.gone) >= goneSweepThreshold {
+		r.sweepGone()
+	}
+	r.gone[key] = time.Now()
 	r.notify()
 }
 
-// Forget drops an entry unconditionally.
-func (r *Registry) Forget(key string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.entries, key)
-	r.notify()
+// sweepGone drops expired markers. It must be called with the write lock held.
+func (r *Registry) sweepGone() {
+	cutoff := time.Now().Add(-goneTTL)
+	for key, at := range r.gone {
+		if at.Before(cutoff) {
+			delete(r.gone, key)
+		}
+	}
+}
+
+// isGone reports whether a pod with no entry is known to have been deleted.
+// It must be called with at least the read lock held.
+func (r *Registry) isGone(key string) bool {
+	at, ok := r.gone[key]
+	return ok && time.Since(at) < goneTTL
 }
 
 // Get returns a copy of an entry.
@@ -309,8 +358,13 @@ func (r *Registry) waitFor(ctx context.Context, key string, pred func(*Entry) (b
 		changed := r.changed
 		e, ok := r.entries[key]
 		var snapshot *Entry
-		if ok {
+		switch {
+		case ok:
 			snapshot = e.clone()
+		case r.isGone(key):
+			// The pod was deleted before anything was ever recorded for it,
+			// so there is nothing coming. Answer from the marker.
+			snapshot = &Entry{podGone: true}
 		}
 		r.mu.RUnlock()
 

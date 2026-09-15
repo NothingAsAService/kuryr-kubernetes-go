@@ -18,10 +18,17 @@ import (
 type Metrics struct {
 	duration *prometheus.HistogramVec
 	failures *prometheus.CounterVec
+	tracked  prometheus.GaugeFunc
 }
 
 // NewMetrics registers the collectors.
-func NewMetrics(reg prometheus.Registerer) *Metrics {
+//
+// The registry is passed so the tracked-pod gauge can read it when it is
+// scraped rather than being pushed on every change. That gauge is the one
+// that says whether the daemon's view of the node has drifted: it should
+// track the number of pods on the node, and a number that only ever grows is
+// the symptom of entries that are recorded but never removed.
+func NewMetrics(reg prometheus.Registerer, pods *registry.Registry) *Metrics {
 	m := &Metrics{
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "kuryr_cni_request_duration_seconds",
@@ -36,6 +43,14 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Help: "CNI requests that failed, by command and reason.",
 		}, []string{"command", "reason"}),
 	}
+	if pods != nil {
+		m.tracked = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "kuryr_cni_tracked_pods",
+			Help: "Pods this node's daemon currently holds binding information for.",
+		}, func() float64 { return float64(pods.Len()) })
+		reg.MustRegister(m.tracked)
+	}
+
 	reg.MustRegister(m.duration, m.failures)
 	return m
 }
