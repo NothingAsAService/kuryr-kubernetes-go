@@ -3,9 +3,11 @@ package drivers
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	kuryrv1 "opendev.org/openstack/kuryr-kubernetes/api/v1"
 	"opendev.org/openstack/kuryr-kubernetes/pkg/config"
@@ -441,13 +443,60 @@ func newNestedMacvlanDriver(d Deps) (PodVIFDriver, error) {
 // Name is the registered driver name, used in logs and metrics.
 func (n *nestedMacvlanDriver) Name() string { return "nested-macvlan" }
 
+// parentPortFor resolves the node VM's own Neutron port, which is the one
+// whose allowed address pairs have to carry every pod address on the node.
+func (n *nestedMacvlanDriver) parentPortFor(ctx context.Context,
+	req PodVIFRequest) (*openstack.Port, error) {
+
+	hostIP, err := hostIPFor(req)
+	if err != nil {
+		return nil, err
+	}
+	parent, err := n.os.FindPortByFixedIP(ctx, hostIP)
+	if err != nil {
+		return nil, fmt.Errorf("finding the node VM port for %s: %w", hostIP, err)
+	}
+	return parent, nil
+}
+
+// addressPairsOf is the pairs a pod port needs on the node VM uplink: one per
+// address it holds, all carrying the pod port's MAC, which is the address the
+// macvlan child inside the pod will send from.
+func addressPairsOf(port *openstack.Port) []openstack.AddressPair {
+	out := make([]openstack.AddressPair, 0, len(port.FixedIPs))
+	for _, fip := range port.FixedIPs {
+		if fip.IPAddress == "" {
+			continue
+		}
+		out = append(out, openstack.AddressPair{
+			IPAddress:  fip.IPAddress,
+			MACAddress: port.MACAddress,
+		})
+	}
+	return out
+}
+
 // RequestVIF creates one port and records it as an allowed address pair on the
 // node VM uplink, which is what lets a macvlan child use it.
+//
+// Without the pair Neutron's anti-spoofing rules drop every packet the pod
+// sends: the traffic leaves the node VM's port carrying an address that port
+// does not own. The pair is what makes this driver work at all, so a failure
+// to add it deletes the port rather than handing back one nothing can use.
 func (n *nestedMacvlanDriver) RequestVIF(ctx context.Context, req PodVIFRequest) (*kuryrv1.VIF, error) {
 	networkID, ok := req.Subnets.NetworkID()
 	if !ok {
 		return nil, fmt.Errorf("subnets for pod span more than one network")
 	}
+
+	// Resolve the parent before creating anything: a pod that is not
+	// scheduled yet has nowhere for its address to be allowed, and finding
+	// that out after the port exists would mean cleaning it up again.
+	parent, err := n.parentPortFor(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
 	port, err := n.os.CreatePort(ctx, openstack.PortSpec{
 		NetworkID:      networkID,
 		ProjectID:      req.ProjectID,
@@ -460,32 +509,110 @@ func (n *nestedMacvlanDriver) RequestVIF(ctx context.Context, req PodVIFRequest)
 	if err != nil {
 		return nil, err
 	}
+
+	if err := n.allowAddresses(ctx, parent.ID, port); err != nil {
+		_ = n.os.DeletePort(ctx, port.ID)
+		return nil, err
+	}
+
 	network, err := n.os.GetNetwork(ctx, port.NetworkID)
 	if err != nil {
+		_ = n.denyAddresses(ctx, parent.ID, port)
 		_ = n.os.DeletePort(ctx, port.ID)
 		return nil, err
 	}
 	return vif.FromPortNestedMacvlan(port, req.Subnets, network)
 }
 
-// RequestVIFs creates count ports one at a time. Each needs its own update to
-// the uplink's allowed address pairs, so there is no bulk call to make here.
-func (n *nestedMacvlanDriver) RequestVIFs(ctx context.Context, req PodVIFRequest,
-	count int) ([]*kuryrv1.VIF, error) {
+// allowAddresses adds a pod port's addresses to the node VM uplink.
+func (n *nestedMacvlanDriver) allowAddresses(ctx context.Context, parentID string,
+	port *openstack.Port) error {
 
-	out := make([]*kuryrv1.VIF, 0, count)
-	for i := 0; i < count; i++ {
-		v, err := n.RequestVIF(ctx, req)
-		if err != nil {
-			return out, err
-		}
-		out = append(out, v)
+	wanted := addressPairsOf(port)
+	if len(wanted) == 0 {
+		return fmt.Errorf("port %s has no address to allow on the node VM uplink", port.ID)
 	}
-	return out, nil
+
+	err := n.os.UpdateAllowedAddressPairs(ctx, parentID,
+		func(pairs []openstack.AddressPair) []openstack.AddressPair {
+			for _, want := range wanted {
+				if !slices.Contains(pairs, want) {
+					pairs = append(pairs, want)
+				}
+			}
+			return pairs
+		})
+	if err != nil {
+		return fmt.Errorf("allowing the addresses of port %s on the node VM port %s: %w",
+			port.ID, parentID, err)
+	}
+	return nil
 }
 
-// ReleaseVIF deletes the port. The allowed address pair goes with it.
-func (n *nestedMacvlanDriver) ReleaseVIF(ctx context.Context, v *kuryrv1.VIF, _ PodVIFRequest) error {
+// denyAddresses takes a pod port's addresses back off the node VM uplink.
+//
+// Leaving them would let a later pod that happened to be given the same
+// address send from a node it is not on, so this is not merely tidying up.
+func (n *nestedMacvlanDriver) denyAddresses(ctx context.Context, parentID string,
+	port *openstack.Port) error {
+
+	doomed := addressPairsOf(port)
+	if len(doomed) == 0 {
+		return nil
+	}
+
+	err := n.os.UpdateAllowedAddressPairs(ctx, parentID,
+		func(pairs []openstack.AddressPair) []openstack.AddressPair {
+			return slices.DeleteFunc(pairs, func(p openstack.AddressPair) bool {
+				return slices.Contains(doomed, p)
+			})
+		})
+	if err != nil {
+		return fmt.Errorf("removing the addresses of port %s from the node VM port %s: %w",
+			port.ID, parentID, err)
+	}
+	return nil
+}
+
+// RequestVIFs is not supported, as in the Python implementation, whose
+// NestedMacvlanPodVIFDriver.request_vifs raises NotImplementedError. Every
+// port needs its own read-modify-write against the node VM uplink's allowed
+// address pairs, so there is no such thing as an interchangeable unbound one
+// to pool. The configuration is still accepted, as it is upstream; a pool
+// asked to fill itself reports this error instead.
+func (n *nestedMacvlanDriver) RequestVIFs(context.Context, PodVIFRequest, int) ([]*kuryrv1.VIF, error) {
+	return nil, fmt.Errorf(
+		"the nested-macvlan driver cannot create unbound ports in bulk; set [kubernetes]vif_pool_driver=noop")
+}
+
+// ReleaseVIF removes the address pair from the node VM uplink, then deletes
+// the port.
+func (n *nestedMacvlanDriver) ReleaseVIF(ctx context.Context, v *kuryrv1.VIF, req PodVIFRequest) error {
+	// The port is read back rather than rebuilt from the VIF because the
+	// pairs were written from its fixed IPs and MAC, and they have to be
+	// removed by exactly the same values.
+	port, err := n.os.GetPort(ctx, v.ID)
+	switch {
+	case err == nil:
+		parent, perr := n.parentPortFor(ctx, req)
+		if perr != nil {
+			// With no pod there is no host IP to find the parent by. Deleting
+			// the port still frees the address, and the stale pair is
+			// harmless until something else claims that address.
+			log.FromContext(ctx).V(1).Info(
+				"could not find the node VM port to remove the allowed address pair",
+				"portID", v.ID, "reason", perr)
+			break
+		}
+		if derr := n.denyAddresses(ctx, parent.ID, port); derr != nil {
+			return derr
+		}
+	case openstack.IsNotFound(err):
+		// Already gone, and its pairs with it.
+	default:
+		return err
+	}
+
 	return n.os.DeletePort(ctx, v.ID)
 }
 
