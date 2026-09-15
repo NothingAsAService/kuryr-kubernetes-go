@@ -1,9 +1,10 @@
 # kuryr-controller: the OpenStack-facing half of Kuryr.
 #
-# Two replicas with leader election. Only the leader reconciles, because two
+# One replica by default, as in the Python implementation's manifests. For
+# active/passive HA, scale to more replicas on a cluster with at least that
+# many nodes: leader election ensures only one reconciles, because two
 # controllers acting on the same pod would both create Neutron ports and only
-# one would win the status write, leaking the other. The standby exists so a
-# node failure costs a lease timeout rather than a restart.
+# one would win the status write, leaking the other.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -22,16 +23,27 @@ metadata:
     app.kubernetes.io/component: controller
     control-plane: controller-manager
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: kuryr
       app.kubernetes.io/component: controller
+  # The strategy the Python implementation's manifests use. The pod is
+  # hostNetwork, so Kubernetes defaults hostPort to each declared
+  # containerPort, and together with the anti-affinity below no two controller
+  # pods can share a node. With maxSurge above 0, when every schedulable node
+  # already runs a controller pod -- always the case on a single-node cluster --
+  # the surge pod cannot be scheduled, maxUnavailable keeps the old pod alive,
+  # and the rollout never completes. maxSurge 0 removes an old pod first.
+  #
+  # When scaling above one replica, keep replicas no higher than the number of
+  # schedulable nodes: a replica that can never be scheduled blocks a rollout
+  # in the same way.
   strategy:
     type: RollingUpdate
     rollingUpdate:
+      maxSurge: 0
       maxUnavailable: 1
-      maxSurge: 1
   template:
     metadata:
       annotations:
