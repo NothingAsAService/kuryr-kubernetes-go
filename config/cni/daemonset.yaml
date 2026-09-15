@@ -50,7 +50,7 @@ spec:
                   fieldPath: spec.nodeName
           ports:
             - name: metrics
-              containerPort: 9999
+              containerPort: 9655
             - name: probes
               containerPort: 8090
           livenessProbe:

@@ -181,7 +181,7 @@ Only used by the `vhostuser` binding driver.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `controller_exporter_port` | `9654` | Controller metrics port. The Deployment passes `--metrics-bind-address`, which takes precedence and serves over TLS with authentication, so this only applies when that flag is absent |
-| `cni_exporter_port` | `9655` | Node agent metrics port. The agent is hostNetwork and node-local, and serves plaintext here |
+| `cni_exporter_port` | `9655` | Node agent metrics port. The DaemonSet passes no `--metrics-bind-address`, so this is the port it listens on, in plaintext; the DaemonSet's `metrics` container port must match |
 
 ## `[neutron]` — Keystone credentials
 
