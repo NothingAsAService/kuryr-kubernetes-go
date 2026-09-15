@@ -101,12 +101,14 @@ data:
     netns_proc_dir = /host_proc
 
     [prometheus_exporter]
-    # The controller's Deployment passes --metrics-bind-address=:8443 and
-    # serves over TLS with authentication, so this port only takes effect
-    # when that flag is removed. The CNI agent has no such flag: it is
-    # hostNetwork and node-local, and serves plaintext on this port.
-    controller_exporter_port = 9998
-    cni_exporter_port = 9999
+    # Both binaries take --metrics-bind-address, and the flag wins where it
+    # is passed. The controller's Deployment passes :8443 and serves over TLS
+    # with authentication, so its port below only takes effect if that flag
+    # is removed. The DaemonSet passes no flag, so the CNI agent listens here
+    # in plaintext; its container port in config/cni/daemonset.yaml has to
+    # match. These are the Python implementation's defaults.
+    controller_exporter_port = 9654
+    cni_exporter_port = 9655
 
     [neutron]
     # REQUIRED: Keystone credentials. Any value left empty falls back to the

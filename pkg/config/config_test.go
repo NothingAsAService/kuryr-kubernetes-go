@@ -270,3 +270,90 @@ func TestValidateRejectsPooledNestedDPDK(t *testing.T) {
 		t.Errorf("nested-dpdk with vif_pool_driver=noop should be accepted: %v", err)
 	}
 }
+
+// Most of the sample sets keys to their default value, so loading it cannot
+// tell a correct file from one whose section headers have been mangled: ini
+// accepts trailing text after "]" silently, moves every key below it into the
+// wrong section, and the defaults stand in unnoticed.
+func TestSampleConfigIsWellFormed(t *testing.T) {
+	path := filepath.Join("..", "..", "etc", "kuryr.conf")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+
+	for n, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		switch {
+		case line == "", strings.HasPrefix(line, "#"):
+			continue
+		case strings.HasPrefix(line, "["):
+			if !strings.HasSuffix(line, "]") {
+				t.Errorf("%s:%d: section header has trailing text, so every key "+
+					"below it lands in the wrong section: %q", path, n+1, line)
+			}
+		case strings.Contains(line, "="):
+			continue
+		default:
+			t.Errorf("%s:%d: line is neither a comment, a section header nor a "+
+				"key assignment: %q", path, n+1, line)
+		}
+	}
+}
+
+// The DaemonSet declares the agent's metrics port and the ConfigMap sets the
+// port the agent listens on. Nothing reconciles the two at runtime.
+func TestCNIMetricsPortMatchesTheDaemonSet(t *testing.T) {
+	cfg := loadShipped(t)
+
+	path := filepath.Join("..", "..", "config", "cni", "daemonset.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+
+	var ds struct {
+		Spec struct {
+			Template struct {
+				Spec struct {
+					Containers []struct {
+						Ports []struct {
+							Name          string `json:"name"`
+							ContainerPort int    `json:"containerPort"`
+						} `json:"ports"`
+					} `json:"containers"`
+				} `json:"spec"`
+			} `json:"template"`
+		} `json:"spec"`
+	}
+	if err := yaml.Unmarshal(raw, &ds); err != nil {
+		t.Fatalf("parsing %s: %v", path, err)
+	}
+
+	declared := 0
+	for _, c := range ds.Spec.Template.Spec.Containers {
+		for _, port := range c.Ports {
+			if port.Name == "metrics" {
+				declared = port.ContainerPort
+			}
+		}
+	}
+	if declared == 0 {
+		t.Fatalf("%s declares no container port named metrics", path)
+	}
+	if declared != cfg.Prometheus.CNIPort {
+		t.Errorf("%s declares metrics on %d, but the ConfigMap sets "+
+			"[prometheus_exporter]cni_exporter_port = %d",
+			path, declared, cfg.Prometheus.CNIPort)
+	}
+}
+
+// The shipped ports are the Python implementation's defaults, so a deployment
+// migrating from it keeps its scrape configuration.
+func TestShippedExporterPortsMatchUpstreamDefaults(t *testing.T) {
+	cfg := loadShipped(t)
+	if cfg.Prometheus.ControllerPort != 9654 || cfg.Prometheus.CNIPort != 9655 {
+		t.Errorf("[prometheus_exporter] ports = %d/%d, want the upstream 9654/9655",
+			cfg.Prometheus.ControllerPort, cfg.Prometheus.CNIPort)
+	}
+}
