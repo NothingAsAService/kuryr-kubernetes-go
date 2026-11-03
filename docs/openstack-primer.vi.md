@@ -341,7 +341,7 @@ Chọn bằng `[kubernetes]pod_vif_driver`:
 | --- | --- | --- | --- |
 | `neutron-vif` | máy vật lý | veth, một đầu cắm vào integration bridge | Mặc định. Đơn giản nhất |
 | `nested-vlan` | máy ảo | subport trên trunk + interface 802.1Q | Cần extension `trunk`. Tối đa 4094 pod/node |
-| `nested-macvlan` | máy ảo | macvlan con của uplink + allowed address pair | Không cần trunk, không giới hạn số pod, nhưng **Neutron không lọc được traffic**. Không dùng được port pool |
+| `nested-macvlan` | máy ảo | macvlan con của uplink + allowed address pair | Không cần trunk. Mỗi pod chiếm một allowed address pair trên port VM node; Neutron mặc định chỉ cho 10 (`max_allowed_address_pair`), nên tối đa 10 pod/node nếu không nâng giới hạn. Ngoài ra **Neutron không lọc được traffic**. Không dùng được port pool |
 | `nested-dpdk` | máy ảo | Nova gắn interface, pod tự lái bằng driver userspace | Cho workload NFV. Không dùng được port pool |
 
 Với `nested-macvlan`, địa chỉ của pod **phải** được ghi vào

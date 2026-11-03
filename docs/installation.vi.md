@@ -34,6 +34,7 @@ trước — tài liệu này giả định bạn đã biết chúng là gì.
 | Octavia | Chỉ khi cần Service | Không có thì bỏ cặp handler `service,kuryrloadbalancer` |
 | Nova | Chỉ với `nested-dpdk` | |
 | Extension `trunk` của Neutron | Chỉ với `nested-vlan` | Kiểm tra: `openstack extension list --network \| grep trunk` |
+| `max_allowed_address_pair` đủ lớn | Chỉ với `nested-macvlan` | Mỗi pod chiếm một pair trên port VM node; mặc định 10. Đặt trong `neutron.conf` |
 
 ### Phía Kubernetes
 
@@ -496,6 +497,7 @@ kubectl describe kuryrport -n <namespace> <tên-pod>
 | Service `LoadBalancer` báo không hỗ trợ | Chưa đặt `external_svc_net` | §2.7 và [configuration.md](configuration.md) |
 | Pod ping được nhưng TLS treo | MTU mạng pod lớn hơn MTU uplink node | Giảm MTU của Neutron network |
 | Pod macvlan không gửi được gói | Thiếu allowed address pair | Kuryr tự thêm; nếu lỗi sẽ có trong log controller |
+| Pod macvlan thứ 11 trên một node lỗi `AllowedAddressPairExhausted` | Port VM node đã dùng hết `max_allowed_address_pair` (mặc định 10) | Tăng `max_allowed_address_pair` trong `[DEFAULT]` của `neutron.conf` rồi restart neutron-server |
 
 ### Các lệnh hay dùng
 
