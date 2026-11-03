@@ -16,11 +16,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kuryrv1 "opendev.org/openstack/kuryr-kubernetes/api/v1"
@@ -409,11 +412,41 @@ func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Service{}).
 		Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(sliceToService)).
+		// A Service's security groups follow its pods' (the policy service
+		// SG driver), so a pod whose groups change must refresh them, as
+		// Python's update_lbaas_sg does from the KuryrPort handler.
+		Watches(&kuryrv1.KuryrPort{}, handler.EnqueueRequestsFromMapFunc(r.servicesInNamespace),
+			builder.WithPredicates(securityGroupsChanged)).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: r.Config.Kubernetes.MaxConcurrentReconciles,
 		}).
 		Named("service").
 		Complete(r)
+}
+
+// securityGroupsChanged passes KuryrPort events that change the groups on
+// the pod's ports. Every other status write is activation noise.
+var securityGroupsChanged = predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		oldKP, okOld := e.ObjectOld.(*kuryrv1.KuryrPort)
+		newKP, okNew := e.ObjectNew.(*kuryrv1.KuryrPort)
+		return !okOld || !okNew || !slices.Equal(oldKP.Status.SecurityGroups, newKP.Status.SecurityGroups)
+	},
+}
+
+// servicesInNamespace maps an object onto every Service in its namespace.
+func (r *ServiceReconciler) servicesInNamespace(ctx context.Context, obj client.Object) []reconcile.Request {
+	var list corev1.ServiceList
+	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+		log.FromContext(ctx).Error(err, "listing Services to refresh their security groups",
+			"namespace", obj.GetNamespace())
+		return nil
+	}
+	out := make([]reconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		out = append(out, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+	}
+	return out
 }
 
 // sliceToService maps an EndpointSlice onto the Service that owns it.

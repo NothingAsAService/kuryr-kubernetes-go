@@ -908,3 +908,17 @@ func TestKLBRecordsBackendSecurityGroupsWithoutTouchingTheVIPPort(t *testing.T) 
 		t.Errorf("recorded groups = %v, want [sg-a sg-b]", got)
 	}
 }
+
+// A policy whose rules change must refresh the VIP rules of the load
+// balancers in its namespace, and only those.
+func TestKLBRefreshesOnPolicyChange(t *testing.T) {
+	here := newKLBObject()
+	elsewhere := newKLBObject(func(k *kuryrv1.KuryrLoadBalancer) { k.Namespace = "other" })
+	r := newKLBReconciler(t, nil, nil, here, elsewhere)
+
+	knp := &kuryrv1.KuryrNetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: "deny", Namespace: here.Namespace}}
+	got := r.loadBalancersInNamespace(context.Background(), knp)
+	if len(got) != 1 || got[0].Name != here.Name || got[0].Namespace != here.Namespace {
+		t.Errorf("enqueued %v, want only %s/%s", got, here.Namespace, here.Name)
+	}
+}

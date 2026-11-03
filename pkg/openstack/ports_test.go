@@ -214,3 +214,43 @@ func TestUpdateAllowedAddressPairsGivesUpOnEndlessConflict(t *testing.T) {
 		t.Errorf("made %d attempts, want %d", f.puts, addressPairRetries)
 	}
 }
+
+// Two networks can hold the same address. Only the port on a worker node
+// subnet, carrying the resource tags, is the node VM.
+func TestFindPortByFixedIPPicksTheWorkerSubnetPort(t *testing.T) {
+	var query string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ports": []map[string]any{
+			{"id": "other-vm", "fixed_ips": []map[string]string{{"subnet_id": "tenant-sub", "ip_address": "10.0.0.5"}}},
+			{"id": "node-vm", "fixed_ips": []map[string]string{{"subnet_id": "worker-sub", "ip_address": "10.0.0.5"}}},
+		}})
+	}))
+	t.Cleanup(srv.Close)
+	provider := &gophercloud.ProviderClient{}
+	provider.HTTPClient = *srv.Client()
+	c := &Client{
+		Provider: provider,
+		Network:  &gophercloud.ServiceClient{ProviderClient: provider, Endpoint: srv.URL + "/"},
+		Tags:     []string{"kuryr"},
+	}
+
+	port, err := c.FindPortByFixedIP(context.Background(), "10.0.0.5", []string{"worker-sub"})
+	if err != nil {
+		t.Fatalf("FindPortByFixedIP: %v", err)
+	}
+	if port.ID != "node-vm" {
+		t.Errorf("picked port %s, want node-vm on the worker subnet", port.ID)
+	}
+	if !strings.Contains(query, "tags=kuryr") {
+		t.Errorf("query %q does not filter by the resource tags", query)
+	}
+
+	if _, err := c.FindPortByFixedIP(context.Background(), "10.0.0.5", []string{"nowhere"}); err == nil {
+		t.Error("expected an error when no port is on a worker subnet")
+	}
+	if _, err := c.FindPortByFixedIP(context.Background(), "10.0.0.5", nil); err == nil {
+		t.Error("expected an error with no worker subnets configured")
+	}
+}

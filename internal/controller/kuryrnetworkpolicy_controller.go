@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -49,6 +50,7 @@ type securityGroupCloud interface {
 	FindSecurityGroupsByName(ctx context.Context, name, projectID string) ([]*openstack.SecurityGroup, error)
 	DeleteSecurityGroup(ctx context.Context, id string) error
 	CreateSGRule(ctx context.Context, r openstack.SGRule) (*openstack.SGRule, error)
+	ListSGRules(ctx context.Context, sgID string) ([]*openstack.SGRule, error)
 	DeleteSGRule(ctx context.Context, id string) error
 	GetSubnet(ctx context.Context, id string) (*openstack.Subnet, error)
 }
@@ -262,25 +264,48 @@ func (r *KuryrNetworkPolicyReconciler) syncRules(ctx context.Context, knp *kuryr
 	}
 
 	// Whatever is no longer wanted goes now that every new rule is in place.
+	// Every deletion is attempted even after one fails: a rule whose delete
+	// failed is still in Neutron, so it has to stay in the status. Dropping
+	// it would leave a rule nothing knows about, still enforcing something
+	// the policy no longer says.
 	var removed int
+	var deleteErrs []error
 	for key, existing := range have {
 		if kept[key] {
 			continue
 		}
-		if err := r.OpenStack.DeleteSGRule(ctx, existing.ID); err != nil {
-			if !openstack.IsNotFound(err) {
-				// The rule is still in Neutron, so it has to stay in the
-				// status: dropping it here would leave a rule nothing knows
-				// about, still enforcing something the policy no longer says.
-				next = append(next, existing)
-				if saveErr := r.saveRules(ctx, knp, next); saveErr != nil {
-					return fmt.Errorf("%w (and recording the surviving rules failed: %w)", err, saveErr)
-				}
-				return fmt.Errorf("deleting security group rule %s: %w", existing.ID, err)
-			}
-			// Already gone in Neutron, which is the state we wanted.
+		if err := r.OpenStack.DeleteSGRule(ctx, existing.ID); err != nil && !openstack.IsNotFound(err) {
+			next = append(next, existing)
+			deleteErrs = append(deleteErrs, fmt.Errorf("deleting security group rule %s: %w", existing.ID, err))
+			continue
+		}
+		// Deleted, or already gone in Neutron, which is the state we wanted.
+		removed++
+	}
+
+	// Rules in the group that the status does not account for go too.
+	// Neutron seeds every new group with allow-all egress rules for IPv4 and
+	// IPv6; left in place they make every egress policy a no-op (Python
+	// deletes them right after creating the group). A pass that crashed
+	// before recording a rule also leaves one behind.
+	stray, err := r.strayRules(ctx, sgID, have, next)
+	if err != nil {
+		deleteErrs = append(deleteErrs, err)
+	}
+	for _, id := range stray {
+		if err := r.OpenStack.DeleteSGRule(ctx, id); err != nil && !openstack.IsNotFound(err) {
+			// Not recorded either way; the next pass lists it again.
+			deleteErrs = append(deleteErrs, fmt.Errorf("deleting unrecorded security group rule %s: %w", id, err))
+			continue
 		}
 		removed++
+	}
+
+	if err := errors.Join(deleteErrs...); err != nil {
+		if saveErr := r.saveRules(ctx, knp, next); saveErr != nil {
+			return fmt.Errorf("%w (and recording the surviving rules failed: %w)", err, saveErr)
+		}
+		return err
 	}
 
 	if created == 0 && removed == 0 && len(next) == len(knp.Status.SecurityGroupRules) {
@@ -293,6 +318,31 @@ func (r *KuryrNetworkPolicyReconciler) syncRules(ctx context.Context, knp *kuryr
 	logger.Info("security group rules synced",
 		"securityGroupID", sgID, "created", created, "removed", removed, "total", len(next))
 	return nil
+}
+
+// strayRules lists the IDs of rules in the group that neither the old status
+// nor the new one records.
+func (r *KuryrNetworkPolicyReconciler) strayRules(ctx context.Context, sgID string,
+	have map[string]kuryrv1.CreatedSGRule, next []kuryrv1.CreatedSGRule) ([]string, error) {
+
+	actual, err := r.OpenStack.ListSGRules(ctx, sgID)
+	if err != nil {
+		return nil, fmt.Errorf("listing the rules of security group %s: %w", sgID, err)
+	}
+	known := make(map[string]bool, len(have)+len(next))
+	for _, cr := range have {
+		known[cr.ID] = true
+	}
+	for _, cr := range next {
+		known[cr.ID] = true
+	}
+	var out []string
+	for _, rule := range actual {
+		if !known[rule.ID] {
+			out = append(out, rule.ID)
+		}
+	}
+	return out, nil
 }
 
 // infrastructureRules are the ingress rules every policy security group

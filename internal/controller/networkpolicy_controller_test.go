@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	kuryrv1 "opendev.org/openstack/kuryr-kubernetes/api/v1"
 	"opendev.org/openstack/kuryr-kubernetes/pkg/config"
@@ -268,5 +269,67 @@ func TestPoliciesForNamespaceEnqueuesSelectorPolicies(t *testing.T) {
 	}
 	if got["elsewhere"] {
 		t.Error("an unrelated policy in another namespace was enqueued")
+	}
+}
+
+// End to end through the real resolver: an egress rule to some pods also
+// opens the cluster IP of the Service in front of them.
+func TestNetworkPolicyAllowsEgressThroughTheBackendsService(t *testing.T) {
+	np := newNetworkPolicy(func(np *netv1.NetworkPolicy) {
+		np.Spec.PolicyTypes = []netv1.PolicyType{netv1.PolicyTypeEgress}
+		np.Spec.Ingress = nil
+		np.Spec.Egress = []netv1.NetworkPolicyEgressRule{{
+			To: []netv1.NetworkPolicyPeer{{
+				PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "db"}},
+			}},
+		}}
+	})
+	db := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-0", Namespace: "default", Labels: map[string]string{"app": "db"}},
+		Status:     corev1.PodStatus{PodIP: "10.0.1.5"},
+	}
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "default"},
+		Spec: corev1.ServiceSpec{
+			Selector:   map[string]string{"app": "db"},
+			ClusterIP:  "10.96.0.10",
+			ClusterIPs: []string{"10.96.0.10"},
+		},
+	}
+	r := newPolicyReconciler(t, np, db, svc)
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: np.Namespace, Name: np.Name},
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	var knp kuryrv1.KuryrNetworkPolicy
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(np), &knp); err != nil {
+		t.Fatalf("reading the KuryrNetworkPolicy: %v", err)
+	}
+	found := false
+	for _, rule := range knp.Spec.EgressRules {
+		if rule.Rule.RemoteIPPrefix == "10.96.0.10/32" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no egress rule to the Service cluster IP: %+v", knp.Spec.EgressRules)
+	}
+}
+
+func TestServiceAddressingChangedPredicate(t *testing.T) {
+	svc := &corev1.Service{Spec: corev1.ServiceSpec{
+		ClusterIPs: []string{"10.96.0.10"}, Selector: map[string]string{"app": "db"}}}
+
+	relabelled := svc.DeepCopy()
+	relabelled.Labels = map[string]string{"team": "a"}
+	if serviceAddressingChanged.Update(event.UpdateEvent{ObjectOld: svc, ObjectNew: relabelled}) {
+		t.Error("a label change on the Service itself cannot change a rule")
+	}
+	reselected := svc.DeepCopy()
+	reselected.Spec.Selector = map[string]string{"app": "cache"}
+	if !serviceAddressingChanged.Update(event.UpdateEvent{ObjectOld: svc, ObjectNew: reselected}) {
+		t.Error("a selector change was filtered out")
 	}
 }

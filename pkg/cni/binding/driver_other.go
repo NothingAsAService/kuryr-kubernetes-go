@@ -3,6 +3,7 @@
 package binding
 
 import (
+	"context"
 	"errors"
 	"runtime"
 )
@@ -20,3 +21,7 @@ func ConfigureL3(Request) error { return ErrUnsupportedPlatform }
 
 // ConfigureL3With is unavailable off Linux.
 func ConfigureL3With(Request, Options) error { return ErrUnsupportedPlatform }
+
+func addVHostUserPort(context.Context, string, Request) error { return ErrUnsupportedPlatform }
+
+func delVHostUserPort(context.Context, string, Request) error { return ErrUnsupportedPlatform }

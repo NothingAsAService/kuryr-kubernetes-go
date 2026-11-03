@@ -100,6 +100,7 @@ func (r *ClientResolver) Pods(ctx context.Context, sel *metav1.LabelSelector,
 				Name:           pod.Name,
 				IP:             pod.Status.PodIP,
 				ContainerPorts: namedContainerPorts(pod),
+				Labels:         pod.Labels,
 			})
 		}
 	}
@@ -192,6 +193,38 @@ func (r *ClientResolver) NamedPorts(ctx context.Context, sel *metav1.LabelSelect
 				out = append(out, port.ContainerPort)
 			}
 		}
+	}
+	return out, nil
+}
+
+// Services returns the Services in a namespace that have a cluster IP and are
+// not being deleted.
+func (r *ClientResolver) Services(ctx context.Context, namespace string) ([]ServiceRef, error) {
+	var list corev1.ServiceList
+	if err := r.Client.List(ctx, &list, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("listing Services in namespace %q: %w", namespace, err)
+	}
+	out := make([]ServiceRef, 0, len(list.Items))
+	for i := range list.Items {
+		svc := &list.Items[i]
+		if !svc.DeletionTimestamp.IsZero() {
+			continue
+		}
+		var ips []string
+		for _, ip := range svc.Spec.ClusterIPs {
+			if ip != "" && ip != corev1.ClusterIPNone {
+				ips = append(ips, ip)
+			}
+		}
+		if len(ips) == 0 {
+			continue
+		}
+		out = append(out, ServiceRef{
+			Namespace:  svc.Namespace,
+			Name:       svc.Name,
+			ClusterIPs: ips,
+			Selector:   svc.Spec.Selector,
+		})
 	}
 	return out, nil
 }

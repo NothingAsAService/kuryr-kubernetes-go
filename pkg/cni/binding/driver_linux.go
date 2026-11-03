@@ -199,7 +199,7 @@ func (d *ovsDriver) Disconnect(ctx context.Context, req Request) error {
 // keeps the daemon free of an OVSDB client and matches what an operator would
 // type to check the result. iface-id is the important one: it is how the agent
 // matches a bridge port to a Neutron port and programs the flows.
-func ovsAddPort(ctx context.Context, bridge, ifname string, req Request) error {
+func ovsAddPort(ctx context.Context, bridge, ifname string, req Request, columns ...string) error {
 	if bridge == "" {
 		return fmt.Errorf("no OVS bridge configured for port %s", req.VIF.ID)
 	}
@@ -213,6 +213,7 @@ func ovsAddPort(ctx context.Context, bridge, ifname string, req Request) error {
 	if req.PodUID != "" {
 		args = append(args, "external_ids:vm-uuid="+req.PodUID)
 	}
+	args = append(args, columns...)
 	return runOVSVsctl(ctx, args...)
 }
 
@@ -246,7 +247,7 @@ func (d *bridgeDriver) Name() string { return "bridge" }
 
 // Connect makes a veth pair, moves one end into the pod namespace and enslaves
 // the other to the Linux bridge Neutron named.
-func (d *bridgeDriver) Connect(_ context.Context, req Request) error {
+func (d *bridgeDriver) Connect(ctx context.Context, req Request) error {
 	hostName := req.VIF.VIFName
 	if hostName == "" {
 		hostName = kuryrv1.HostIfaceName(req.VIF.ID)
@@ -257,6 +258,12 @@ func (d *bridgeDriver) Connect(_ context.Context, req Request) error {
 		return err
 	}
 	if err := removeLinkIfPresent(hostName); err != nil {
+		return err
+	}
+
+	// Python relied on os_vif.plug() to build the bridge and its uplink to
+	// OVS before this point; nothing else on the node creates them.
+	if err := plugHybrid(ctx, d.opts.OVSBridge, req); err != nil {
 		return err
 	}
 
@@ -295,13 +302,17 @@ func (d *bridgeDriver) Connect(_ context.Context, req Request) error {
 }
 
 // Disconnect deletes the host end of the veth pair, which takes the pod end
-// and the bridge membership with it.
-func (d *bridgeDriver) Disconnect(_ context.Context, req Request) error {
+// and the bridge membership with it, then the bridge and its uplink to OVS,
+// as os-vif's unplug did.
+func (d *bridgeDriver) Disconnect(ctx context.Context, req Request) error {
 	hostName := req.VIF.VIFName
 	if hostName == "" {
 		hostName = kuryrv1.HostIfaceName(req.VIF.ID)
 	}
-	return removeLinkIfPresent(hostName)
+	if err := removeLinkIfPresent(hostName); err != nil {
+		return err
+	}
+	return unplugHybrid(ctx, d.opts.OVSBridge, req)
 }
 
 // --- nested vlan -------------------------------------------------------

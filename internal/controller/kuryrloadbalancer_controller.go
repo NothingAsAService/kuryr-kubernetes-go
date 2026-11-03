@@ -17,7 +17,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kuryrv1 "opendev.org/openstack/kuryr-kubernetes/api/v1"
 	"opendev.org/openstack/kuryr-kubernetes/pkg/config"
@@ -904,11 +906,33 @@ func (r *KuryrLoadBalancerReconciler) setCondition(ctx context.Context, klb *kur
 func (r *KuryrLoadBalancerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kuryrv1.KuryrLoadBalancer{}).
+		// The VIP rules mirror the rules of the backends' policy groups, so a
+		// policy whose rules change must refresh them, as Python's
+		// update_lbaas_sg does from the KuryrNetworkPolicy handler.
+		Watches(&kuryrv1.KuryrNetworkPolicy{}, handler.EnqueueRequestsFromMapFunc(r.loadBalancersInNamespace)).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: r.Config.Kubernetes.MaxConcurrentReconciles,
 		}).
 		Named("kuryrloadbalancer").
 		Complete(r)
+}
+
+// loadBalancersInNamespace maps an object onto every KuryrLoadBalancer in its
+// namespace.
+func (r *KuryrLoadBalancerReconciler) loadBalancersInNamespace(ctx context.Context,
+	obj client.Object) []reconcile.Request {
+
+	var list kuryrv1.KuryrLoadBalancerList
+	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+		log.FromContext(ctx).Error(err, "listing KuryrLoadBalancers to refresh their VIP rules",
+			"namespace", obj.GetNamespace())
+		return nil
+	}
+	out := make([]reconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		out = append(out, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+	}
+	return out
 }
 
 // --- small helpers -----------------------------------------------------

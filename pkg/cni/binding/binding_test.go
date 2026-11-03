@@ -77,3 +77,10 @@ func TestForRejectsUnknownVIFType(t *testing.T) {
 		t.Fatal("expected an error for an unregistered VIF type")
 	}
 }
+
+func TestHybridVethNamesMatchTheNeutronAgent(t *testing.T) {
+	qvb, qvo := hybridVethNames("3f2a9c1e-0b44-4d5e-9a61-1234567890ab")
+	if qvb != "qvb3f2a9c1e-0b" || qvo != "qvo3f2a9c1e-0b" {
+		t.Errorf("names = %s, %s; want qvb3f2a9c1e-0b, qvo3f2a9c1e-0b", qvb, qvo)
+	}
+}

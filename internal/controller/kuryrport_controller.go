@@ -37,6 +37,10 @@ const portActivationRequeue = 2 * time.Second
 // port visible to kubectl instead of only to whoever is reading logs.
 const portActivationTimeout = 90 * time.Second
 
+// heldPortRecheck is how often a KuryrPort deleted while its pod still runs
+// checks whether the pod has gone, so its ports can finally be released.
+const heldPortRecheck = 30 * time.Second
+
 // KuryrPortReconciler is the OpenStack-facing half of pod networking: it owns
 // every Neutron call in the pod lifecycle.
 type KuryrPortReconciler struct {
@@ -406,6 +410,17 @@ func (r *KuryrPortReconciler) finalize(ctx context.Context, kp *kuryrv1.KuryrPor
 		if fetched.UID == kp.Spec.PodUID {
 			pod = &fetched
 		}
+	}
+
+	// A KuryrPort deleted by hand while its pod still runs must not take the
+	// pod's ports with it: the interface inside the pod would point at a
+	// deleted port, and the Pod controller would hand out a new one with a
+	// new address. Hold the finalizer, as Python does, until the pod itself
+	// is deleted or completes. Nothing watches the pod for that, so recheck.
+	if pod != nil && pod.DeletionTimestamp.IsZero() && !isPodCompleted(pod) {
+		logger.Info("KuryrPort was deleted while its pod is still running; keeping its ports " +
+			"until the pod goes. KuryrPorts are internal to Kuryr and should not be deleted by hand")
+		return ctrl.Result{RequeueAfter: heldPortRecheck}, nil
 	}
 
 	projectID := ""

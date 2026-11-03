@@ -47,6 +47,10 @@ type Resolver interface {
 	// egress the name belongs to the peer, and PodRef.ContainerPorts carries
 	// it instead.
 	NamedPorts(ctx context.Context, sel *metav1.LabelSelector, namespace, portName string) ([]int32, error)
+
+	// Services returns the Services in a namespace that have a cluster IP
+	// and are not being deleted.
+	Services(ctx context.Context, namespace string) ([]ServiceRef, error)
 }
 
 // PodRef is one pod a peer selector matched.
@@ -68,6 +72,8 @@ type PodRef struct {
 	// upstream kuryr-kubernetes's ingress path does for both directions -- opens the
 	// wrong port or none at all.
 	ContainerPorts map[string][]int32
+	// Labels are the pod's labels, which decide the Services fronting it.
+	Labels map[string]string
 }
 
 // affected turns a matched pod into the CRD's record of it.
@@ -82,7 +88,9 @@ func (p PodRef) affected() kuryrv1.AffectedPod {
 // NetworkPolicy: selecting a pod for a direction denies that direction unless
 // a rule permits it. So "deny all ingress" needs no rule at all, and the
 // absence of rules here is meaningful rather than a failure.
-func Translate(ctx context.Context, np *netv1.NetworkPolicy, r Resolver) (kuryrv1.KuryrNetworkPolicySpec, error) {
+func Translate(ctx context.Context, np *netv1.NetworkPolicy, r Resolver,
+	opts Options) (kuryrv1.KuryrNetworkPolicySpec, error) {
+
 	spec := kuryrv1.KuryrNetworkPolicySpec{
 		PodSelector: np.Spec.PodSelector,
 		PolicyTypes: policyTypes(np),
@@ -92,6 +100,11 @@ func Translate(ctx context.Context, np *netv1.NetworkPolicy, r Resolver) (kuryrv
 		switch netv1.PolicyType(t) {
 		case netv1.PolicyTypeIngress:
 			rules, err := translateIngress(ctx, np, r)
+			if err == nil && opts.ServiceIngress {
+				var hairpin []kuryrv1.SGRuleSpec
+				hairpin, err = serviceIngressRules(ctx, np, r)
+				rules = append(rules, hairpin...)
+			}
 			if err != nil {
 				return spec, fmt.Errorf("translating ingress rules of NetworkPolicy %s/%s: %w",
 					np.Namespace, np.Name, err)
@@ -197,6 +210,12 @@ func translateEgress(ctx context.Context, np *netv1.NetworkPolicy, r Resolver) (
 				return nil, fmt.Errorf("egress rule %d: %w", i, err)
 			}
 			out = append(out, rules...)
+
+			viaService, err := serviceEgressRules(ctx, pr, ports, np, r)
+			if err != nil {
+				return nil, fmt.Errorf("egress rule %d: %w", i, err)
+			}
+			out = append(out, viaService...)
 		}
 	}
 

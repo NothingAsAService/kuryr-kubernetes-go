@@ -22,14 +22,15 @@ func init() {
 	})
 }
 
-// vhostUserMode values, from the point of view of Open vSwitch.
+// vhostUserMode values, from the point of view of the pod (os-vif's
+// VIFVHostUser.mode).
 const (
-	// vhostUserModeServer means OVS creates the socket and the pod connects
+	// vhostUserModeServer means the pod creates the socket and OVS connects
 	// to it. Nothing has to be moved.
 	vhostUserModeServer = "server"
-	// vhostUserModeClient means OVS connects to a socket, which it creates
-	// in its own directory and which therefore has to be moved to where the
-	// pod can see it.
+	// vhostUserModeClient means the pod connects to a socket OVS creates in
+	// its own directory, which therefore has to be moved to where the pod
+	// can see it.
 	vhostUserModeClient = "client"
 )
 
@@ -51,7 +52,20 @@ type vhostUserConfig struct {
 // namespace: a vhost-user port is a Unix socket that a userspace dataplane in
 // the pod opens directly. All this driver does is put the socket, and a small
 // file describing it, where the pod can reach them.
-type vhostUserDriver struct{ opts Options }
+type vhostUserDriver struct {
+	opts Options
+	// addPort and delPort manage the OVS port behind the socket. They are
+	// fields so tests can run without Open vSwitch; nil means the real ones.
+	addPort, delPort func(ctx context.Context, bridge string, req Request) error
+}
+
+// bridge is the OVS bridge the vhost-user port lives on.
+func (d *vhostUserDriver) bridge(req Request) string {
+	if req.VIF.Bridge != "" {
+		return req.VIF.Bridge
+	}
+	return d.opts.OVSBridge
+}
 
 // Name is the registered driver name, used in logs and metrics.
 func (d *vhostUserDriver) Name() string { return "vhostuser" }
@@ -73,6 +87,14 @@ func (d *vhostUserDriver) Connect(ctx context.Context, req Request) error {
 
 	if err := d.writeConfig(req, portName); err != nil {
 		return err
+	}
+
+	addPort := d.addPort
+	if addPort == nil {
+		addPort = addVHostUserPort
+	}
+	if err := addPort(ctx, d.bridge(req), req); err != nil {
+		return fmt.Errorf("creating the OVS vhost-user port of VIF %s: %w", req.VIF.ID, err)
 	}
 
 	if req.VIF.VHostUser.Mode == vhostUserModeServer {
@@ -103,6 +125,14 @@ func (d *vhostUserDriver) Connect(ctx context.Context, req Request) error {
 func (d *vhostUserDriver) Disconnect(ctx context.Context, req Request) error {
 	logger := log.FromContext(ctx)
 	configPath := d.configPath(req)
+
+	delPort := d.delPort
+	if delPort == nil {
+		delPort = delVHostUserPort
+	}
+	if err := delPort(ctx, d.bridge(req), req); err != nil {
+		return fmt.Errorf("removing the OVS vhost-user port of VIF %s: %w", req.VIF.ID, err)
+	}
 
 	conf, err := d.readConfig(configPath)
 	if err != nil {
@@ -187,4 +217,16 @@ func checkSocket(p string) error {
 		return fmt.Errorf("%s exists but is not a socket", p)
 	}
 	return nil
+}
+
+// vhostUserPortColumns are the Interface columns os-vif sets for a vhost-user
+// port. The mode is the pod's (os-vif's VIFVHostUser.mode): a pod acting as
+// client means OVS is the server and creates the socket (dpdkvhostuser); a pod
+// acting as server means OVS connects to the socket at the VIF path
+// (dpdkvhostuserclient).
+func vhostUserPortColumns(v *kuryrv1.VIF) []string {
+	if v.VHostUser != nil && v.VHostUser.Mode == vhostUserModeServer {
+		return []string{"type=dpdkvhostuserclient", "options:vhost-server-path=" + v.VHostUser.Path}
+	}
+	return []string{"type=dpdkvhostuser"}
 }
