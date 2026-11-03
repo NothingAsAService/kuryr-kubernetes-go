@@ -31,6 +31,7 @@ type fakeSGCloud struct {
 	createGroupErr error
 	createRuleErr  error
 	deleteGroupErr error
+	deleteRuleErr  error
 }
 
 func newFakeSGCloud() *fakeSGCloud {
@@ -105,6 +106,10 @@ func (f *fakeSGCloud) CreateSGRule(_ context.Context, r openstack.SGRule) (*open
 func (f *fakeSGCloud) DeleteSGRule(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.deleteRuleErr; err != nil {
+		f.deleteRuleErr = nil
+		return err
+	}
 	delete(f.rules, id)
 	return nil
 }
@@ -377,6 +382,54 @@ func TestKNPRecordsRulesCreatedBeforeAFailure(t *testing.T) {
 	cond := findCondition(got, kuryrv1.KuryrNetworkPolicyConditionEnforced)
 	if cond == nil || cond.Status != metav1.ConditionFalse {
 		t.Errorf("Enforced condition = %v, want False after a failure", cond)
+	}
+}
+
+func TestKNPKeepsEveryRuleThatSurvivesAFailedDelete(t *testing.T) {
+	// One failed delete must not stop the others, and every rule still in
+	// Neutron must stay in the status, or nothing ever deletes it.
+	cloud := newFakeSGCloud()
+	knp := newKNP(func(knp *kuryrv1.KuryrNetworkPolicy) {
+		knp.Spec.IngressRules = []kuryrv1.SGRuleSpec{
+			ingressRule("10.0.0.0/8", 80),
+			ingressRule("10.0.0.0/8", 443),
+			ingressRule("10.0.0.0/8", 8080),
+		}
+	})
+	r := newKNPReconciler(t, cloud, knp)
+	reconcileKNP(t, r, knp)
+
+	current := readKNP(t, r, knp)
+	current.Spec.IngressRules = nil
+	if err := r.Update(context.Background(), current); err != nil {
+		t.Fatalf("updating the spec: %v", err)
+	}
+	boom := errors.New("neutron is down")
+	cloud.deleteRuleErr = boom
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: knp.Namespace, Name: knp.Name},
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("Reconcile error = %v, want the injected failure", err)
+	}
+
+	if cloud.ruleCount() != 1 {
+		t.Errorf("Neutron has %d rules, want 1: the other deletes were not attempted", cloud.ruleCount())
+	}
+	got := readKNP(t, r, knp)
+	if len(got.Status.SecurityGroupRules) != cloud.ruleCount() {
+		t.Fatalf("status records %d rules, Neutron has %d: a surviving rule was lost",
+			len(got.Status.SecurityGroupRules), cloud.ruleCount())
+	}
+	if _, ok := cloud.rules[got.Status.SecurityGroupRules[0].ID]; !ok {
+		t.Error("the recorded rule is not the one still in Neutron")
+	}
+
+	// The retry deletes what is left.
+	reconcileKNP(t, r, knp)
+	if cloud.ruleCount() != 0 || len(readKNP(t, r, knp).Status.SecurityGroupRules) != 0 {
+		t.Errorf("after the retry: Neutron has %d rules, want 0", cloud.ruleCount())
 	}
 }
 

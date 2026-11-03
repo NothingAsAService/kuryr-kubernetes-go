@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -262,25 +263,29 @@ func (r *KuryrNetworkPolicyReconciler) syncRules(ctx context.Context, knp *kuryr
 	}
 
 	// Whatever is no longer wanted goes now that every new rule is in place.
+	// Every deletion is attempted even after one fails: a rule whose delete
+	// failed is still in Neutron, so it has to stay in the status. Dropping
+	// it would leave a rule nothing knows about, still enforcing something
+	// the policy no longer says.
 	var removed int
+	var deleteErrs []error
 	for key, existing := range have {
 		if kept[key] {
 			continue
 		}
-		if err := r.OpenStack.DeleteSGRule(ctx, existing.ID); err != nil {
-			if !openstack.IsNotFound(err) {
-				// The rule is still in Neutron, so it has to stay in the
-				// status: dropping it here would leave a rule nothing knows
-				// about, still enforcing something the policy no longer says.
-				next = append(next, existing)
-				if saveErr := r.saveRules(ctx, knp, next); saveErr != nil {
-					return fmt.Errorf("%w (and recording the surviving rules failed: %w)", err, saveErr)
-				}
-				return fmt.Errorf("deleting security group rule %s: %w", existing.ID, err)
-			}
-			// Already gone in Neutron, which is the state we wanted.
+		if err := r.OpenStack.DeleteSGRule(ctx, existing.ID); err != nil && !openstack.IsNotFound(err) {
+			next = append(next, existing)
+			deleteErrs = append(deleteErrs, fmt.Errorf("deleting security group rule %s: %w", existing.ID, err))
+			continue
 		}
+		// Deleted, or already gone in Neutron, which is the state we wanted.
 		removed++
+	}
+	if err := errors.Join(deleteErrs...); err != nil {
+		if saveErr := r.saveRules(ctx, knp, next); saveErr != nil {
+			return fmt.Errorf("%w (and recording the surviving rules failed: %w)", err, saveErr)
+		}
+		return err
 	}
 
 	if created == 0 && removed == 0 && len(next) == len(knp.Status.SecurityGroupRules) {
