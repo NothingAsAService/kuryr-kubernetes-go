@@ -178,3 +178,19 @@ func (o Options) ResolveNetNS(netns string) string {
 	// path, whatever platform this happens to be compiled on.
 	return path.Join(o.NetNSProcDir, strings.TrimPrefix(netns, "/proc/"))
 }
+
+// maxIfNameLen is the kernel's IFNAMSIZ minus the terminating NUL.
+const maxIfNameLen = 14
+
+// hybridVethNames returns the qvb (bridge side) and qvo (OVS side) ends of
+// the veth pair joining a port's qbr bridge to the integration bridge, named
+// the way os-vif and the Neutron OVS agent expect.
+func hybridVethNames(portID string) (qvb, qvo string) {
+	trim := func(s string) string {
+		if len(s) > maxIfNameLen {
+			return s[:maxIfNameLen]
+		}
+		return s
+	}
+	return trim("qvb" + portID), trim("qvo" + portID)
+}

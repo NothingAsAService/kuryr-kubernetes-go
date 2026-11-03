@@ -16,6 +16,8 @@ type vhostUserFixture struct {
 	driver     *vhostUserDriver
 	mountPoint string
 	ovsPath    string
+	// added and deleted record the OVS port calls, in place of ovs-vsctl.
+	added, deleted []string
 }
 
 func newVHostUserFixture(t *testing.T) *vhostUserFixture {
@@ -23,14 +25,24 @@ func newVHostUserFixture(t *testing.T) *vhostUserFixture {
 	mountPoint := t.TempDir()
 	ovsPath := t.TempDir()
 
-	return &vhostUserFixture{
+	f := &vhostUserFixture{
 		driver: &vhostUserDriver{opts: Options{
 			VHostUserMountPoint: mountPoint,
 			OVSVhuPath:          ovsPath,
+			OVSBridge:           "br-int",
 		}},
 		mountPoint: mountPoint,
 		ovsPath:    ovsPath,
 	}
+	f.driver.addPort = func(_ context.Context, bridge string, req Request) error {
+		f.added = append(f.added, bridge+"/"+req.VIF.ID)
+		return nil
+	}
+	f.driver.delPort = func(_ context.Context, bridge string, req Request) error {
+		f.deleted = append(f.deleted, bridge+"/"+req.VIF.ID)
+		return nil
+	}
+	return f
 }
 
 func (f *vhostUserFixture) request(mode string) Request {
@@ -200,5 +212,38 @@ func TestVHostUserConnectRejectsAVIFWithoutConfig(t *testing.T) {
 
 	if err := f.driver.Connect(context.Background(), req); err == nil {
 		t.Fatal("expected an error for a vhostuser VIF with no vhost-user configuration")
+	}
+}
+
+// os-vif created the OVS port before Python's driver ran; without it there is
+// no socket to move. Both connect and disconnect must manage it.
+func TestVHostUserManagesTheOVSPort(t *testing.T) {
+	f := newVHostUserFixture(t)
+	req := f.request(vhostUserModeServer)
+
+	if err := f.driver.Connect(context.Background(), req); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if err := f.driver.Disconnect(context.Background(), req); err != nil {
+		t.Fatalf("Disconnect: %v", err)
+	}
+	if len(f.added) != 1 || f.added[0] != "br-int/port-uuid" {
+		t.Errorf("added ports = %v, want [br-int/port-uuid]", f.added)
+	}
+	if len(f.deleted) != 1 || f.deleted[0] != "br-int/port-uuid" {
+		t.Errorf("deleted ports = %v, want [br-int/port-uuid]", f.deleted)
+	}
+}
+
+func TestVHostUserPortColumnsFollowThePodMode(t *testing.T) {
+	server := vhostUserPortColumns(&kuryrv1.VIF{VHostUser: &kuryrv1.VHostUserConfig{
+		Mode: vhostUserModeServer, Path: "/var/cni/vhostuser/vhu1"}})
+	if len(server) != 2 || server[0] != "type=dpdkvhostuserclient" ||
+		server[1] != "options:vhost-server-path=/var/cni/vhostuser/vhu1" {
+		t.Errorf("pod-as-server columns = %v, want an OVS client pointed at the pod socket", server)
+	}
+	client := vhostUserPortColumns(&kuryrv1.VIF{VHostUser: &kuryrv1.VHostUserConfig{Mode: vhostUserModeClient}})
+	if len(client) != 1 || client[0] != "type=dpdkvhostuser" {
+		t.Errorf("pod-as-client columns = %v, want an OVS-created socket", client)
 	}
 }
