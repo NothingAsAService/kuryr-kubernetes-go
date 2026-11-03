@@ -60,7 +60,25 @@ func (f *fakeSGCloud) CreateSecurityGroup(_ context.Context, name, projectID, de
 		Description: description,
 	}
 	f.groups[sg.ID] = sg
+	// Neutron seeds every new group with allow-all egress for both families.
+	for _, etherType := range []string{"IPv4", "IPv6"} {
+		id := f.id("rule")
+		f.rules[id] = openstack.SGRule{ID: id, SecurityGroupID: sg.ID, Direction: "egress", EtherType: etherType}
+	}
 	return sg, nil
+}
+
+func (f *fakeSGCloud) ListSGRules(_ context.Context, sgID string) ([]*openstack.SGRule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*openstack.SGRule
+	for _, r := range f.rules {
+		if r.SecurityGroupID == sgID {
+			r := r
+			out = append(out, &r)
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeSGCloud) FindSecurityGroupsByName(_ context.Context, name, _ string) ([]*openstack.SecurityGroup, error) {
@@ -231,6 +249,27 @@ func TestKNPCreatesGroupAndRules(t *testing.T) {
 	cond := findCondition(got, kuryrv1.KuryrNetworkPolicyConditionEnforced)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
 		t.Errorf("Enforced condition = %v, want True", cond)
+	}
+}
+
+func TestKNPRemovesNeutronsDefaultEgressRules(t *testing.T) {
+	// Left in place, the allow-all egress rules Neutron seeds a new group
+	// with would make every egress policy a no-op.
+	cloud := newFakeSGCloud()
+	knp := newKNP()
+	r := newKNPReconciler(t, cloud, knp)
+
+	reconcileKNP(t, r, knp)
+
+	got := readKNP(t, r, knp)
+	rules, _ := cloud.ListSGRules(context.Background(), got.Status.SecurityGroupID)
+	for _, rule := range rules {
+		if rule.Direction == "egress" && rule.RemoteIPPrefix == "" && rule.Protocol == "" {
+			t.Errorf("allow-all egress rule %s (%s) is still in the group", rule.ID, rule.EtherType)
+		}
+	}
+	if len(rules) != len(got.Status.SecurityGroupRules) {
+		t.Errorf("group holds %d rules, status records %d", len(rules), len(got.Status.SecurityGroupRules))
 	}
 }
 
