@@ -9,6 +9,7 @@ require (
 	github.com/gophercloud/gophercloud/v2 v2.14.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/vishvananda/netlink v1.3.1
+	github.com/vishvananda/netns v0.0.5
 	gopkg.in/ini.v1 v1.67.3
 	k8s.io/api v0.37.0
 	k8s.io/apimachinery v0.37.0
@@ -61,7 +62,6 @@ require (
 	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
-	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.71.0 // indirect
