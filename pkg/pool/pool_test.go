@@ -766,10 +766,12 @@ func TestStrategyRejectsUnpoolableDriver(t *testing.T) {
 	cfg.NeutronDefaults.Project = testProj
 	cfg.NeutronDefaults.PodSubnet = testSubID
 
-	_, err := New(cfg, newFakeCloud(), fake.NewClientBuilder().WithScheme(testScheme(t)).Build(),
-		newFakeDriver("nested-dpdk"), nil)
-	if err == nil {
-		t.Fatal("expected pooling to be refused for a driver it cannot support")
+	for _, name := range []string{"nested-dpdk", "nested-macvlan"} {
+		_, err := New(cfg, newFakeCloud(), fake.NewClientBuilder().WithScheme(testScheme(t)).Build(),
+			newFakeDriver(name), nil)
+		if err == nil {
+			t.Errorf("expected pooling to be refused for %s, which it cannot support", name)
+		}
 	}
 }
 

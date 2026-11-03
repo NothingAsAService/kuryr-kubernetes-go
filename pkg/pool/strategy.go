@@ -53,8 +53,11 @@ func strategyFor(driverName string, os cloud, k8s client.Client, cfg *config.Con
 	switch driverName {
 	case "neutron-vif":
 		return &baremetalStrategy{baseStrategy: base}, nil
-	case "nested-vlan", "nested-macvlan":
+	case "nested-vlan":
 		return &nestedStrategy{baseStrategy: base}, nil
+	// nested-macvlan is left out on purpose: its RequestVIFs cannot create
+	// unbound ports in bulk, so a pool would fail every pod at runtime.
+	// Refusing here fails at startup instead.
 	default:
 		return nil, fmt.Errorf(
 			"pooling is not supported for pod VIF driver %q; set [kubernetes]vif_pool_driver=noop",
