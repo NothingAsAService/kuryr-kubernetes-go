@@ -591,7 +591,7 @@ func IsOverQuota(err error) bool {
 // first match would attach pods to some other VM.
 func (c *Client) FindPortByFixedIP(ctx context.Context, ip string, nodeSubnets []string) (*Port, error) {
 	if len(nodeSubnets) == 0 {
-		return nil, fmt.Errorf("[pod_vif_nested]worker_nodes_subnets is empty, so the node VM port " +
+		return nil, fmt.Errorf("[pod_vif_nested]worker_nodes_subnets is empty, so the node VM port "+
 			"holding %s cannot be told apart from other ports with that address", ip)
 	}
 	opts := ports.ListOpts{
