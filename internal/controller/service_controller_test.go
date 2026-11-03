@@ -12,6 +12,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	kuryrv1 "opendev.org/openstack/kuryr-kubernetes/api/v1"
@@ -342,5 +343,30 @@ func TestSliceToServiceMapping(t *testing.T) {
 	orphan := newEndpointSlice(func(s *discoveryv1.EndpointSlice) { s.Labels = nil })
 	if reqs := sliceToService(context.Background(), orphan); len(reqs) != 0 {
 		t.Errorf("requests = %v, want none for a slice with no service name", reqs)
+	}
+}
+
+// A pod whose security groups change must refresh the groups of every
+// Service in its namespace, and only those.
+func TestServiceRefreshesOnPodSecurityGroupChange(t *testing.T) {
+	here := newService()
+	elsewhere := newService(func(s *corev1.Service) { s.Namespace = "other" })
+	r := newServiceReconciler(t, here, elsewhere)
+
+	kp := &kuryrv1.KuryrPort{ObjectMeta: metav1.ObjectMeta{Name: "web-0", Namespace: here.Namespace}}
+	got := r.servicesInNamespace(context.Background(), kp)
+	if len(got) != 1 || got[0].Name != here.Name || got[0].Namespace != here.Namespace {
+		t.Errorf("enqueued %v, want only %s/%s", got, here.Namespace, here.Name)
+	}
+
+	changed := kp.DeepCopy()
+	changed.Status.SecurityGroups = []string{"sg-policy"}
+	if !securityGroupsChanged.Update(event.UpdateEvent{ObjectOld: kp, ObjectNew: changed}) {
+		t.Error("a security group change was filtered out")
+	}
+	activated := kp.DeepCopy()
+	activated.Status.Conditions = []metav1.Condition{{Type: "Active"}}
+	if securityGroupsChanged.Update(event.UpdateEvent{ObjectOld: kp, ObjectNew: activated}) {
+		t.Error("a status write that leaves the groups alone should not refresh Services")
 	}
 }
