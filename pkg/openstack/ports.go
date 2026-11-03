@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -580,11 +581,23 @@ func IsOverQuota(err error) bool {
 	return false
 }
 
-// FindPortByFixedIP locates the port holding a given address. This is how a
-// nested VIF driver turns a pod host IP into the node VM parent port, and
-// from there into the trunk pod subports attach to.
-func (c *Client) FindPortByFixedIP(ctx context.Context, ip string) (*Port, error) {
-	opts := ports.ListOpts{FixedIPs: []ports.FixedIPOpts{{IPAddress: ip}}}
+// FindPortByFixedIP locates the node VM port holding a given address. This is
+// how a nested VIF driver turns a pod host IP into the node VM parent port,
+// and from there into the trunk pod subports attach to.
+//
+// As in Python, the port must hold the address on one of the worker node
+// subnets and carry the resource tags. An address alone is not unique: with
+// overlapping CIDRs another network can hold the same IP, and taking the
+// first match would attach pods to some other VM.
+func (c *Client) FindPortByFixedIP(ctx context.Context, ip string, nodeSubnets []string) (*Port, error) {
+	if len(nodeSubnets) == 0 {
+		return nil, fmt.Errorf("[pod_vif_nested]worker_nodes_subnets is empty, so the node VM port " +
+			"holding %s cannot be told apart from other ports with that address", ip)
+	}
+	opts := ports.ListOpts{
+		FixedIPs: []ports.FixedIPOpts{{IPAddress: ip}},
+		Tags:     strings.Join(c.Tags, ","),
+	}
 
 	var found *Port
 	err := ports.List(c.Network, opts).EachPage(ctx, func(_ context.Context, page pagination.Page) (bool, error) {
@@ -592,9 +605,12 @@ func (c *Client) FindPortByFixedIP(ctx context.Context, ip string) (*Port, error
 		if err := ports.ExtractPortsInto(page, &list); err != nil {
 			return false, err
 		}
-		if len(list) > 0 {
-			found = list[0].toPort()
-			return false, nil
+		for i := range list {
+			port := list[i].toPort()
+			if onSubnets(port, ip, nodeSubnets) {
+				found = port
+				return false, nil
+			}
 		}
 		return true, nil
 	})
@@ -602,7 +618,17 @@ func (c *Client) FindPortByFixedIP(ctx context.Context, ip string) (*Port, error
 		return nil, fmt.Errorf("looking up port by fixed IP %s: %w", ip, err)
 	}
 	if found == nil {
-		return nil, fmt.Errorf("no Neutron port holds address %s", ip)
+		return nil, fmt.Errorf("no Neutron port holds address %s on the worker node subnets %v", ip, nodeSubnets)
 	}
 	return found, nil
+}
+
+// onSubnets reports whether port holds ip on one of subnets.
+func onSubnets(port *Port, ip string, subnets []string) bool {
+	for _, fip := range port.FixedIPs {
+		if fip.IPAddress == ip && slices.Contains(subnets, fip.SubnetID) {
+			return true
+		}
+	}
+	return false
 }

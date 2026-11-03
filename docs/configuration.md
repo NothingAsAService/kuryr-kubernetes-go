@@ -140,7 +140,7 @@ Only used when `pod_subnets_driver = namespace`.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `worker_nodes_subnets` | — | The Neutron subnets the Kubernetes nodes live on. NetworkPolicy security groups always allow ingress from them, so kubelet probes keep working on an otherwise isolated pod. Also how `L2` member mode resolves a backend that sits on the node network |
+| `worker_nodes_subnets` | — | The Neutron subnets the Kubernetes nodes live on. NetworkPolicy security groups always allow ingress from them, so kubelet probes keep working on an otherwise isolated pod. Also how `L2` member mode resolves a backend that sits on the node network, and **required by every `nested-*` pod VIF driver**: the node VM port is the one holding the node's address on one of these subnets (and carrying `resource_tags`, when set) |
 
 ## `[binding]`
 

@@ -228,7 +228,7 @@ func (n *nestedVLANDriver) trunkFor(ctx context.Context, hostIP string) (*openst
 		return cached.(*openstack.Trunk), nil
 	}
 
-	parent, err := n.os.FindPortByFixedIP(ctx, hostIP)
+	parent, err := n.os.FindPortByFixedIP(ctx, hostIP, n.cfg.PodVIFNested.WorkerNodesSubnets)
 	if err != nil {
 		return nil, fmt.Errorf("finding the node VM port for %s: %w", hostIP, err)
 	}
@@ -452,7 +452,7 @@ func (n *nestedMacvlanDriver) parentPortFor(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
-	parent, err := n.os.FindPortByFixedIP(ctx, hostIP)
+	parent, err := n.os.FindPortByFixedIP(ctx, hostIP, n.cfg.PodVIFNested.WorkerNodesSubnets)
 	if err != nil {
 		return nil, fmt.Errorf("finding the node VM port for %s: %w", hostIP, err)
 	}
@@ -665,7 +665,7 @@ func (n *nestedDPDKDriver) serverFor(ctx context.Context, req PodVIFRequest) (st
 	if err != nil {
 		return "", err
 	}
-	parent, err := n.os.FindPortByFixedIP(ctx, hostIP)
+	parent, err := n.os.FindPortByFixedIP(ctx, hostIP, n.cfg.PodVIFNested.WorkerNodesSubnets)
 	if err != nil {
 		return "", fmt.Errorf("finding the node VM port for %s: %w", hostIP, err)
 	}
