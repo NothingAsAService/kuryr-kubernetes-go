@@ -56,15 +56,15 @@ func newAnnotationProjectDriver(d Deps) (ProjectDriver, error) {
 // ProjectFor reads the project from the object's namespace annotation, falling
 // back to the configured default when the namespace does not pin one.
 func (p *annotationProjectDriver) ProjectFor(ctx context.Context, obj client.Object) (string, error) {
-	// A Namespace carries the annotation directly; anything else inherits it
-	// from the namespace it lives in.
-	if annotations := obj.GetAnnotations(); annotations != nil {
-		if v, ok := annotations[ProjectAnnotation]; ok && v != "" {
-			return v, nil
-		}
-	}
-
+	// Only the namespace's annotation counts, as in Python. Honouring it on a
+	// Pod or Service would let anyone who can create one place its port or
+	// load balancer in any project the controller can reach. The namespace
+	// is read back even when obj is one, since callers may pass a stub
+	// carrying only the name.
 	nsName := obj.GetNamespace()
+	if _, isNamespace := obj.(*corev1.Namespace); isNamespace {
+		nsName = obj.GetName()
+	}
 	if nsName == "" {
 		if p.projectID == "" {
 			return "", fmt.Errorf("no project annotation on %s and no default configured", obj.GetName())
