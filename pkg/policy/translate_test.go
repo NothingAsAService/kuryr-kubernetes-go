@@ -24,6 +24,9 @@ type fakeResolver struct {
 	// named ports are resolved against the destination, so this is what an
 	// egress rule reads instead of namedPorts.
 	podPorts map[string]map[string][]int32
+	// podLabels maps a peer pod's IP to its labels.
+	podLabels map[string]map[string]string
+	services  []ServiceRef
 
 	namespacesErr error
 	podIPsErr     error
@@ -56,7 +59,18 @@ func (f *fakeResolver) Pods(_ context.Context, _ *metav1.LabelSelector, namespac
 			Name:           "pod-" + ip,
 			IP:             ip,
 			ContainerPorts: f.podPorts[ip],
+			Labels:         f.podLabels[ip],
 		})
+	}
+	return out, nil
+}
+
+func (f *fakeResolver) Services(_ context.Context, ns string) ([]ServiceRef, error) {
+	var out []ServiceRef
+	for _, svc := range f.services {
+		if svc.Namespace == ns {
+			out = append(out, svc)
+		}
 	}
 	return out, nil
 }
@@ -98,7 +112,7 @@ func tcpPort(n int) netv1.NetworkPolicyPort {
 
 func translate(t *testing.T, np *netv1.NetworkPolicy, r Resolver) kuryrv1.KuryrNetworkPolicySpec {
 	t.Helper()
-	spec, err := Translate(context.Background(), np, r)
+	spec, err := Translate(context.Background(), np, r, Options{})
 	if err != nil {
 		t.Fatalf("Translate: %v", err)
 	}
@@ -431,7 +445,7 @@ func TestResolverErrorsPropagate(t *testing.T) {
 	})
 
 	boom := errors.New("api server unavailable")
-	_, err := Translate(context.Background(), np, &fakeResolver{podIPsErr: boom})
+	_, err := Translate(context.Background(), np, &fakeResolver{podIPsErr: boom}, Options{})
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want it to wrap the resolver failure", err)
 	}
@@ -445,7 +459,7 @@ func TestBadIPBlockIsReported(t *testing.T) {
 		}}
 	})
 
-	if _, err := Translate(context.Background(), np, &fakeResolver{}); err == nil {
+	if _, err := Translate(context.Background(), np, &fakeResolver{}, Options{}); err == nil {
 		t.Fatal("expected an error for an unparseable ipBlock")
 	}
 }
@@ -462,7 +476,7 @@ func TestEndPortBelowPortIsRejected(t *testing.T) {
 		}}
 	})
 
-	if _, err := Translate(context.Background(), np, &fakeResolver{}); err == nil {
+	if _, err := Translate(context.Background(), np, &fakeResolver{}, Options{}); err == nil {
 		t.Fatal("expected an error when endPort is below port")
 	}
 }

@@ -3,7 +3,9 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	netv1 "k8s.io/api/networking/v1"
@@ -13,11 +15,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kuryrv1 "opendev.org/openstack/kuryr-kubernetes/api/v1"
@@ -63,7 +68,9 @@ func (r *NetworkPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
-	spec, err := policy.Translate(ctx, &np, r.Resolver)
+	spec, err := policy.Translate(ctx, &np, r.Resolver, policy.Options{
+		ServiceIngress: !r.Config.OctaviaDefaults.EnforceSGRules,
+	})
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -117,6 +124,11 @@ func (r *NetworkPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.policiesForPod)).
 		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(r.policiesForNamespace)).
 		Watches(&kuryrv1.KuryrNetwork{}, handler.EnqueueRequestsFromMapFunc(r.policiesForKuryrNetwork)).
+		// Egress rules include the cluster IPs of Services fronting allowed
+		// peers, and hairpin ingress the namespace's cluster IPs. Python bumps
+		// policies on Service create and delete for the same reason.
+		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(r.allPolicies),
+			builder.WithPredicates(serviceAddressingChanged)).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: r.Config.Kubernetes.MaxConcurrentReconciles,
 		}).
@@ -247,6 +259,28 @@ func (r *NetworkPolicyReconciler) policiesIn(ctx context.Context, namespace stri
 		out = append(out, requestFor(&list.Items[i]))
 	}
 	return out
+}
+
+// allPolicies returns every policy in the cluster. A Service can be the
+// destination of a peer in any namespace, so its changes are not confined to
+// the policies of its own namespace.
+func (r *NetworkPolicyReconciler) allPolicies(ctx context.Context, _ client.Object) []reconcile.Request {
+	return r.policiesIn(ctx, metav1.NamespaceAll)
+}
+
+// serviceAddressingChanged passes Service events that can change a rule: a
+// Service appearing or going, or its cluster IPs or selector changing.
+var serviceAddressingChanged = predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		oldSvc, okOld := e.ObjectOld.(*corev1.Service)
+		newSvc, okNew := e.ObjectNew.(*corev1.Service)
+		if !okOld || !okNew {
+			return true
+		}
+		return !slices.Equal(oldSvc.Spec.ClusterIPs, newSvc.Spec.ClusterIPs) ||
+			!maps.Equal(oldSvc.Spec.Selector, newSvc.Spec.Selector) ||
+			oldSvc.DeletionTimestamp.IsZero() != newSvc.DeletionTimestamp.IsZero()
+	},
 }
 
 func requestFor(np *netv1.NetworkPolicy) reconcile.Request {
